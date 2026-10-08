@@ -1,0 +1,18 @@
+{
+  "version": "pilot-relations-1",
+  "product_drawings": [
+    {"product_id": 16, "product_name": "НФГ-6,0-02", "drawing_id": "nfg6-02-r1", "drawing_name": "НФГ-6,0-02 · ред. 1", "drawing_file_id": 900001},
+    {"product_id": 16, "product_name": "НФГ-6,0-02", "drawing_id": "nfg6-05-r1", "drawing_name": "НФГ-6,0-05(М) · ред. 1", "drawing_file_id": 900002},
+    {"product_id": 17, "product_name": "ОГК-6", "drawing_id": "ogk6-r1", "drawing_name": "ОГК-6 · ред. 1", "drawing_file_id": 900003},
+    {"product_id": 18, "product_name": "Кронштейн 1.К1-2,0-2,0-Ф2", "drawing_id": "bracket-f2-r1", "drawing_name": "1.К1-2,0-2,0-Ф2 · ред. 1", "drawing_file_id": 900004},
+    {"product_id": 19, "product_name": "Закладная деталь ЗФ-20/4/К230-2,0", "drawing_id": "zf20-r1", "drawing_name": "ЗФ-20/4/К230-2,0 · ред. 1", "drawing_file_id": 900005}
+  ],
+  "drawing_kd": [
+    {"drawing_id": "nfg6-02-r1", "kit_id": "kd-nfg6-02-r1", "kit_name": "Комплект КД НФГ-6,0-02", "file_id": 900006, "file_name": "Спецификация НФГ-6,0-02"},
+    {"drawing_id": "nfg6-02-r1", "kit_id": "kd-nfg6-02-r1", "kit_name": "Комплект КД НФГ-6,0-02", "file_id": 900007, "file_name": "Сборочный лист НФГ-6,0-02"},
+    {"drawing_id": "nfg6-05-r1", "kit_id": "kd-nfg6-05-r1", "kit_name": "Комплект КД НФГ-6,0-05(М)", "file_id": 900008, "file_name": "Спецификация НФГ-6,0-05(М)"},
+    {"drawing_id": "ogk6-r1", "kit_id": "kd-ogk6-r1", "kit_name": "Комплект КД ОГК-6", "file_id": 900009, "file_name": "Спецификация ОГК-6"},
+    {"drawing_id": "bracket-f2-r1", "kit_id": "kd-bracket-f2-r1", "kit_name": "Комплект КД кронштейна Ф2", "file_id": 900010, "file_name": "Спецификация кронштейна Ф2"},
+    {"drawing_id": "zf20-r1", "kit_id": "kd-zf20-r1", "kit_name": "Комплект КД ЗФ-20", "file_id": 900011, "file_name": "Спецификация ЗФ-20"}
+  ]
+}

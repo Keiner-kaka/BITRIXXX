@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Установка конструктора КП ЮЗМ</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://api.bitrix24.tech/api/v1/"></script>
+</head>
+<body>
+  <main class="workspace">
+    <article class="proposal-card" style="padding:32px;max-width:620px;margin:auto">
+      <h1>Конструктор КП ЮЗМ</h1>
+      <p>Завершите установку приложения, затем откройте настройки и зарегистрируйте вкладку сделки.</p>
+      <p id="installStatus" role="status">Подключение к Bitrix24…</p>
+      <button id="finishInstall" class="button primary" type="button" disabled>Завершить установку</button>
+    </article>
+  </main>
+  <script>
+    if (window.BX24) {
+      BX24.init(function () {
+        document.getElementById('installStatus').textContent = 'Приложение готово к завершению установки.';
+        document.getElementById('finishInstall').disabled = false;
+      });
+      document.getElementById('finishInstall').addEventListener('click', function () { BX24.installFinish(); });
+    } else {
+      document.getElementById('installStatus').textContent = 'Откройте этот обработчик через установку локального приложения в Bitrix24.';
+    }
+  </script>
+</body>
+</html>

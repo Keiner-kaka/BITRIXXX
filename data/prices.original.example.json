@@ -1,0 +1,24 @@
+{
+  "version": "test-1",
+  "currency": "RUB",
+  "prices_per_kg": {
+    "16": 120
+  },
+  "coatings": [
+    {
+      "code": "none",
+      "name": "Без покрытия",
+      "coefficient": 1
+    },
+    {
+      "code": "zinc",
+      "name": "Горячее цинкование",
+      "coefficient": 1.15
+    },
+    {
+      "code": "paint",
+      "name": "Окраска",
+      "coefficient": 1.08
+    }
+  ]
+}
