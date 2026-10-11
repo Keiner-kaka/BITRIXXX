@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / 'dist'
 RUNTIME = [
-    'index.html', 'install.html', 'styles.css',
+    'index.html', 'styles.css',
     'src/app.js', 'src/calculator.js', 'src/bitrix.js', 'src/demo.js',
     'data/coatings.example.json', 'data/metal-prices.example.json',
 ]
@@ -53,8 +53,12 @@ def build():
     DIST.mkdir(exist_ok=True)
     install_archive = DIST / 'yuzm-kp-bitrix.zip'
     write_archive(install_archive, RUNTIME)
+    # The optional wizard performs no required setup. Leaving it out lets
+    # Bitrix finish a static app installation and open index.html directly.
+    with zipfile.ZipFile(install_archive) as archive:
+        assert 'install.html' not in archive.namelist()
     names = list(RUNTIME)
-    names.extend(['index.php', 'install.php', 'package.json', 'README.md'])
+    names.extend(['index.php', 'install.html', 'install.php', 'package.json', 'README.md'])
     for directory in ['src', 'data', 'docs', 'tests', 'scripts']:
         names.extend(
             file.relative_to(ROOT).as_posix()
@@ -79,6 +83,8 @@ def build():
             'index_in_root': True,
             'index_first': True,
             'portable_zip_headers': True,
+            'installation': 'automatic_without_wizard',
+            'install_html_included': False,
             'runtime_files': RUNTIME,
         },
         'files': {
