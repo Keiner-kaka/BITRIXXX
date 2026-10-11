@@ -651,24 +651,27 @@ async function importFile(event) {
   finally { event.target.value = ''; }
 }
 async function searchProducts(query, target) {
+  const by = $(target === 'productResults' ? 'productSearchMode' : 'catalogSearchMode').value;
   const request = (productSearchRequests.get(target) || 0) + 1;
   productSearchRequests.set(target, request);
   if (connected && !query.trim()) {
-    $(target).textContent = 'Введите название или ID товара или вариации и нажмите «Найти».';
+    $(target).textContent = by === 'id'
+      ? 'Введите ID товара или вариации и нажмите «Найти».'
+      : 'Введите часть названия, например СФГ или 700, и нажмите «Найти».';
     return;
   }
   $(target).textContent = 'Поиск…';
   try {
     const matches = connected
-      ? await adapter.searchProducts(query)
-      : demoProducts.filter(p => p.id === query || p.name.toLocaleLowerCase('ru').includes(query.toLocaleLowerCase('ru')));
+      ? await adapter.searchProducts(query, {by})
+      : demoProducts.filter(p => by === 'id' ? p.id === query : p.name.toLocaleLowerCase('ru').includes(query.toLocaleLowerCase('ru')));
     if (productSearchRequests.get(target) !== request) return;
     $(target).replaceChildren(...matches.map(product => element('button', {
       type: 'button', class: 'catalog-result', 'data-product': JSON.stringify(product),
       text: productLabel(product) + (product.parentProductName ? ' · основной товар: ' + product.parentProductName : '')
         + ' · ' + formatMoney(product.basePrice, product.currency) + ' · #' + product.id
     })));
-    if (!matches.length) $(target).append(element('p', {class: 'empty-state', text: 'Товары и активные вариации не найдены. Можно искать по названию или ID основного товара и вариации.'}));
+    if (!matches.length) $(target).append(element('p', {class: 'empty-state', text: 'Товары и активные вариации не найдены. Проверьте запрос и выбранный способ поиска: по названию или по ID.'}));
   } catch (error) { if (productSearchRequests.get(target) === request) $(target).textContent = safeError(error); }
   finally { updateConnectionDiagnostics(); }
 }
@@ -828,6 +831,12 @@ function bindEvents() {
     if (raw) try { chooseProduct(JSON.parse(raw)); } catch (error) { status(safeError(error), 'error'); }
   });
   $('searchCatalogBtn').addEventListener('click', () => { chosenRow = null; searchProducts($('catalogQuery').value.trim(), 'catalogResults'); });
+  for (const [modeId, queryId, resultsId] of [['productSearchMode', 'productQuery', 'productResults'], ['catalogSearchMode', 'catalogQuery', 'catalogResults']]) {
+    $(modeId).addEventListener('change', () => {
+      $(queryId).placeholder = $(modeId).value === 'id' ? 'ID товара или вариации' : 'Название или часть названия';
+      searchProducts($(queryId).value.trim(), resultsId);
+    });
+  }
   $('saveBtn').addEventListener('click', saveVersion);
   $('createQuoteBtn').addEventListener('click', async () => { const snapshot = await saveVersion(); if (snapshot) showQuote(snapshot); });
   $('applyDealBtn').addEventListener('click', applyToDeal);

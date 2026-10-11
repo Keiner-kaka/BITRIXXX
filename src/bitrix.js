@@ -340,6 +340,7 @@ export class BitrixAdapter {
     return new Promise((resolve, reject) => {
       const items = [];
       let pages = 0;
+      let lastOffset = Number(params.start ?? 0);
       let settled = false;
       let timer;
       const finish = (error) => {
@@ -374,6 +375,8 @@ export class BitrixAdapter {
           pages += 1;
           trace.pages = pages;
           trace.items = items.length;
+          const total = typeof result.total === 'function' ? result.total() : undefined;
+          if (Number.isSafeInteger(total) && total >= 0) trace.total_items = total;
           if (items.length > maxItems) {
             return finish(broadSearchError());
           }
@@ -381,13 +384,30 @@ export class BitrixAdapter {
           const more = typeof result.more === 'function' ? result.more() : false;
           if (!more) return finish();
           if (!page.length) return finish(new Error(`Bitrix24: ${method} — пустая страница с продолжением.`));
+          // The official SDK exposes the server cursor in answer.next. A repeated
+          // offset means pagination stalled, not that there are more matching items.
+          if (result.answer?.next !== undefined) {
+            const offset = Number(result.answer.next);
+            if (!Number.isSafeInteger(offset) || offset <= lastOffset) {
+              const error = new Error(`Bitrix24: ${method} — повторяется страница списка. Скопируйте диагностику из настроек.`);
+              error.code = 'PAGINATION_STALLED';
+              return finish(error);
+            }
+            lastOffset = offset;
+            trace.next_offset = offset;
+          }
           armTimer();
           if (typeof result.next === 'function') result.next(consume);
           else this.sdk.callMethod(method, { ...params, start: pages * 50 }, consume);
         } catch { finish(new Error(`Bitrix24: ${method} — ошибка чтения страницы SDK.`)); }
       };
       armTimer();
-      try { this.sdk.callMethod(method, { ...params, start: params.start ?? 0 }, consume); }
+      // BX24.next() adds its own start. A data.start=0 remains in the official
+      // SDK's cloned query and overrides that cursor (start=50&start=0).
+      // Let the server use its default zero offset on the initial request.
+      const firstParams = {...params};
+      if (firstParams.start === undefined || Number(firstParams.start) === 0) delete firstParams.start;
+      try { this.sdk.callMethod(method, firstParams, consume); }
       catch { finish(new Error(`Bitrix24: ${method} — ошибка транспорта SDK.`)); }
     });
   }
@@ -534,10 +554,11 @@ export class BitrixAdapter {
     return output.sort((a, b) => a.name.localeCompare(b.name, 'ru') || Number(a.id) - Number(b.id));
   }
 
-  async searchProducts(query = '') {
+  async searchProducts(query = '', {by = 'auto'} = {}) {
     const text = String(query).trim();
+    if (!['auto', 'name', 'id'].includes(by)) throw new Error('Выберите поиск по названию или ID товара.');
     // A parent ID expands into its offers; a concrete product ID stays exact.
-    if (/^[1-9]\d*$/.test(text)) {
+    if (by === 'id' || (by === 'auto' && /^[1-9]\d*$/.test(text))) {
       const productId = id(text, 'ID товара');
       let found;
       try { found = await this._readProduct(productId); }
@@ -584,7 +605,7 @@ export class BitrixAdapter {
       const key = offers ? 'offers' : 'products';
       const rows = await this._list(method, {
         select: ['id', 'iblockId', 'name', 'type', 'active', ...(offers ? ['parentId'] : [])],
-        filter: { iblockId: Number(id(catalog.iblockId ?? catalog.id, 'ID инфоблока')), active: 'Y', ...(text ? { '%name': text } : {}) },
+        filter: { iblockId: Number(id(catalog.iblockId ?? catalog.id, 'ID инфоблока')), active: 'Y', ...(text ? { '=%name': `%${text}%` } : {}) },
         order: { name: 'ASC', id: 'ASC' },
       }, key, {maxItems: MAX_SEARCH_ITEMS});
       for (const row of rows) {
@@ -596,7 +617,7 @@ export class BitrixAdapter {
         try {
           const heads = await this._list('catalog.product.sku.list', {
             select: ['id', 'iblockId', 'name', 'type', 'active'],
-            filter: {iblockId: Number(id(catalog.iblockId ?? catalog.id, 'ID инфоблока')), active: 'Y', ...(text ? {'%name': text} : {})},
+            filter: {iblockId: Number(id(catalog.iblockId ?? catalog.id, 'ID инфоблока')), active: 'Y', ...(text ? {'=%name': `%${text}%`} : {})},
             order: {name: 'ASC', id: 'ASC'},
           }, 'units', {maxItems: MAX_SEARCH_ITEMS});
           for (const head of heads) if (head.active !== 'N') parents.set(id(head.id, 'ID основного товара'), head);

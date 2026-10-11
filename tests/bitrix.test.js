@@ -20,10 +20,12 @@ function sdkMock(routes, placement = { placement: 'CRM_DEAL_DETAIL_TAB', options
           ? {error: outcome.error, error_description: outcome.description ?? ''} : outcome.error;
         queueMicrotask(() => consumer({
           error: () => hasError ? {status: 400, ex: details, getError: () => details} : false,
-          answer: hasError ? {error: outcome.error, error_description: outcome.description ?? ''} : {result: outcome.data},
+          answer: hasError ? {error: outcome.error, error_description: outcome.description ?? ''}
+            : {result: outcome.data, ...(outcome.offsets ? {next: outcome.offsets[page]} : {})},
           error_description: () => outcome.description ?? '',
           data: () => outcome.pages ? outcome.pages[page] : outcome.data,
           more: () => Boolean(outcome.pages && page + 1 < outcome.pages.length),
+          total: () => outcome.total,
           next: (nextConsumer = consumer) => deliver(page + 1, nextConsumer),
         }));
       };
@@ -277,6 +279,31 @@ test('large catalog searches stop pagination before price loading and diagnostic
   assert.equal(api.diagnostics().length, 20);
 });
 
+test('pagination omits initial start=0 and reports the increasing server offset and total', async () => {
+  const {api, sdk} = await adapter({
+    'catalog.catalog.list': {pages: [
+      {catalogs: [{id: 7, iblockId: 7}]}, {catalogs: [{id: 8, iblockId: 8}]},
+    ], offsets: [50], total: 2},
+  });
+  assert.equal((await api._getCatalogs()).length, 2);
+  assert.equal(Object.hasOwn(sdk.calls[0].params, 'start'), false);
+  assert.equal(api.diagnostics()[0].next_offset, 50);
+  assert.equal(api.diagnostics()[0].total_items, 2);
+});
+
+test('repeated or decreasing server cursor is diagnosed before a false broad-search error', async () => {
+  for (const offsets of [[50, 50], [50, 0]]) {
+    const {api} = await adapter({
+      'catalog.catalog.list': {pages: [
+        {catalogs: [{id: 7}]}, {catalogs: [{id: 7}]}, {catalogs: [{id: 7}]},
+      ], offsets, total: 2},
+    });
+    await assert.rejects(api._getCatalogs(), error => error.code === 'PAGINATION_STALLED');
+    assert.equal(api.diagnostics()[0].pages, 2);
+    assert.equal(api.diagnostics()[0].code, 'PAGINATION_STALLED');
+  }
+});
+
 function variationRoutes() {
   const heads = [
     {id: 401, iblockId: 7, name: 'Опора семейство', type: 3, active: 'Y'},
@@ -287,7 +314,10 @@ function variationRoutes() {
     {id: 412, iblockId: 8, name: 'Исполнение 200', type: 4, active: 'Y', parentId: 401},
     {id: 413, iblockId: 8, name: 'Архивное исполнение', type: 4, active: 'N', parentId: 401},
   ];
-  const matches = (row, filter) => (!filter['%name'] || row.name.includes(filter['%name'])) && row.active !== 'N';
+  const matches = (row, filter) => {
+    const term = filter['=%name']?.slice(1, -1) ?? filter['%name'];
+    return (!term || row.name.includes(term)) && row.active !== 'N';
+  };
   return {
     ...productRoutes(),
     'catalog.catalog.list': {data: {catalogs: [{id:7, iblockId:7, productIblockId:0}, {id:8, iblockId:8, productIblockId:7, skuPropertyId:21}]}},
@@ -313,6 +343,25 @@ function variationRoutes() {
 }
 
 function variationParentValue(row) { return row.parentId?.value ?? row.parentId; }
+
+test('substring mode finds Cyrillic and numeric fragments in parent and variation names', async () => {
+  const routes = variationRoutes();
+  routes['catalog.product.sku.list'] = params => {
+    const head = {id: 401, iblockId: 7, name: 'Опора СФГ-700-10,0-01-ц', type: 3, active: 'Y'};
+    const pattern = params.filter['=%name'];
+    return {data: {units: pattern && head.name.includes(pattern.slice(1, -1)) ? [head] : []}};
+  };
+  const {api, sdk} = await adapter(routes);
+  for (const query of ['СФГ', '700', 'СФГ-700']) {
+    const found = await api.searchProducts(query, {by: 'name'});
+    assert.deepEqual(found.map(product => product.id), ['411', '412']);
+  }
+  assert.equal((await api.searchProducts('100', {by: 'name'}))[0].id, '411');
+  assert.equal(sdk.calls.some(call => call.method.endsWith('.get')), false);
+  assert.equal(sdk.calls.some(call => call.params.filter?.['=%name'] === '%700%'), true);
+  assert.deepEqual(await api.searchProducts('700', {by: 'id'}), []);
+  await assert.rejects(api.searchProducts('СФГ', {by: 'id'}), /положительное целое число/);
+});
 
 test('parent name and ID expand to active variations with their own IDs, names and prices', async () => {
   const {api, sdk} = await adapter(variationRoutes());

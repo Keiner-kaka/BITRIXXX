@@ -75,6 +75,7 @@ MOCK = r"""
         return;
       }
       let data, error;
+      const searchName = params.filter?.['=%name']?.slice(1,-1) ?? params.filter?.['%name'] ?? '';
       switch (method) {
         case 'app.info': data={ID:'99',INSTALLED:true}; break;
         case 'app.option.get': if (m.optionsError) error=m.optionsError; else data=m.templateId ?? null; break;
@@ -114,9 +115,9 @@ MOCK = r"""
         case 'catalog.catalog.list': data={catalogs:[{id:7,iblockId:7,name:'Каталог пилота',productIblockId:0}, ...(m.offers ? [{id:8,iblockId:8,name:'Вариации пилота',productIblockId:7,skuPropertyId:21}] : [])]}; break;
         case 'catalog.product.list':
           if (params.filter.iblockId !== 7) {error='WRONG_CATALOG'; break;}
-          data={products:m.products.filter(product=>!params.filter['%name'] || product.name.toLowerCase().includes(params.filter['%name'].toLowerCase()))}; break;
+          data={products:m.products.filter(product=>!searchName || product.name.toLowerCase().includes(searchName.toLowerCase()))}; break;
         case 'catalog.product.sku.list':
-          data={units:(m.parents || []).filter(parent=>parent.active !== 'N' && (!params.filter['%name'] || parent.name.toLowerCase().includes(params.filter['%name'].toLowerCase())))}; break;
+          data={units:(m.parents || []).filter(parent=>parent.active !== 'N' && (!searchName || parent.name.toLowerCase().includes(searchName.toLowerCase())))}; break;
         case 'catalog.product.sku.get': {
           const sku=(m.parents || []).find(parent=>parent.id===Number(params.id));
           if (sku) data={sku}; else error='NOT_FOUND'; break;
@@ -125,7 +126,7 @@ MOCK = r"""
           if (params.filter.iblockId !== 8) {error='WRONG_VARIATION_CATALOG'; break;}
           const ids=params.filter['@parentId'] || (params.filter.parentId ? [params.filter.parentId] : null);
           data={offers:(m.offers || []).filter(offer=>offer.active !== 'N'
-            && (!params.filter['%name'] || offer.name.toLowerCase().includes(params.filter['%name'].toLowerCase()))
+            && (!searchName || offer.name.toLowerCase().includes(searchName.toLowerCase()))
             && (!ids || ids.includes(Number(offer.parentId?.value ?? offer.parentId))))}; break;
         }
         case 'catalog.product.offer.get': {
@@ -340,7 +341,7 @@ with sync_playwright() as p:
     passed('older Disk coating lists gain the combined zinc and RAL painting option')
 
     page.locator('.item-row [data-action=choose-product]').click()
-    expect(page.locator('#productResults')).to_contain_text('Введите название или ID')
+    expect(page.locator('#productResults')).to_contain_text('Введите часть названия')
     page.locator('#productQuery').fill('Г')
     page.locator('#productSearchBtn').click()
     expect(page.locator('#productResults .catalog-result')).to_have_count(2)
@@ -605,7 +606,7 @@ with sync_playwright() as p:
     vp.goto(BASE,wait_until='networkidle')
     expect(vp.locator('#dealBadge')).to_contain_text('1048')
     vp.locator('#addItemBtn').click()
-    expect(vp.locator('#productResults')).to_contain_text('Введите название или ID')
+    expect(vp.locator('#productResults')).to_contain_text('Введите часть названия')
     assert not vp.evaluate("window.__pilotMock.calls.some(call=>call.method==='catalog.catalog.list')")
     vp.locator('#productQuery').fill('Опора серии VAR')
     vp.locator('#productSearchBtn').click()
@@ -615,13 +616,16 @@ with sync_playwright() as p:
     assert vp.locator('#productResults .catalog-result').evaluate_all("nodes=>nodes.map(node=>JSON.parse(node.dataset.product).id)") == ['311','312']
     passed('parent-name search finds active variations whose own names differ and labels them separately')
     vp.locator('#productQuery').fill('301')
+    vp.locator('#productSearchMode').select_option('id')
     vp.locator('#productSearchBtn').click()
     expect(vp.locator('#productResults .catalog-result')).to_have_count(2)
     vp.evaluate('window.__pilotMock.catalogDelay=800')
     vp.locator('#productQuery').fill('Опора серии VAR')
+    vp.locator('#productSearchMode').select_option('name')
     vp.locator('#productSearchBtn').click()
     vp.wait_for_function("window.__pilotMock.calls.at(-1).method==='catalog.product.sku.list'")
     vp.locator('#productQuery').fill('311')
+    vp.locator('#productSearchMode').select_option('id')
     vp.locator('#productSearchBtn').click()
     expect(vp.locator('#productResults .catalog-result')).to_have_count(1)
     expect(vp.locator('#productResults')).to_contain_text('Модель 100')
@@ -676,6 +680,7 @@ with sync_playwright() as p:
     assert money(vp.locator('#grandTotal').inner_text()) == '851,60'
     vp.locator('#addItemBtn').click()
     vp.locator('#productQuery').fill('312')
+    vp.locator('#productSearchMode').select_option('id')
     vp.locator('#productSearchBtn').click()
     expect(vp.locator('#productResults .catalog-result')).to_have_count(1)
     vp.locator('#productResults .catalog-result').click()

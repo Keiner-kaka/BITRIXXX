@@ -7,7 +7,7 @@ No real portal, OAuth token, or credentials are used.
 import json
 import os
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from playwright.sync_api import sync_playwright, expect
 
 BASE = os.environ.get('YUZM_APP_URL', 'http://127.0.0.1:8080/').rstrip('/') + '/'
@@ -78,6 +78,8 @@ with sync_playwright() as p:
             method = urlparse(route.request.url).path.split('/rest/', 1)[-1].removesuffix('.json')
             if method in (api_routes or {}):
                 answer = api_routes[method]
+                if callable(answer):
+                    answer = answer(parse_qs(route.request.post_data or '', keep_blank_values=True))
                 route.fulfill(status=400 if 'error' in answer else 200,
                               content_type='application/json', body=json.dumps(answer))
                 return
@@ -166,9 +168,10 @@ with sync_playwright() as p:
     })
     expect(frame.locator('#connectionBadge')).to_contain_text('подключён')
     frame.locator('#addItemBtn').click()
-    expect(frame.locator('#productResults')).to_contain_text('Введите название или ID')
+    expect(frame.locator('#productResults')).to_contain_text('Введите часть названия')
     assert not any('/rest/catalog.' in call for call in calls)
     frame.locator('#productQuery').fill('101')
+    frame.locator('#productSearchMode').select_option('id')
     frame.locator('#productSearchBtn').click()
     expect(frame.locator('#productResults')).to_contain_text('catalog.product.get — 200040300010')
     expect(frame.locator('#productResults')).to_contain_text('нет права на просмотр')
@@ -191,6 +194,7 @@ with sync_playwright() as p:
     expect(frame.locator('#connectionBadge')).to_contain_text('подключён')
     frame.locator('#addItemBtn').click()
     frame.locator('#productQuery').fill('101')
+    frame.locator('#productSearchMode').select_option('id')
     frame.locator('#productSearchBtn').click()
     expect(frame.locator('#productResults .catalog-result')).to_have_count(1)
     expect(frame.locator('#productResults')).to_contain_text('Вариация рабочего каталога · вариация #101')
@@ -198,6 +202,94 @@ with sync_playwright() as p:
     assert not errors, errors
     context.close()
     passed('actual SDK handles empty missing-product codes and finds the variation with its own BASE price')
+
+    starts = []
+    product_query = 'Опора СФГ-700'
+    def product_pages(params):
+        values = params.get('start', ['0'])
+        starts.append(values)
+        # Like PHP form parsing, the last duplicate scalar wins.
+        offset = int(values[-1])
+        assert params['filter[=%name]'] == ['%' + product_query + '%']
+        assert params['filter[iblockId]'] == ['7']
+        rows = [{'id': 1000 + index, 'iblockId': 7, 'type': 1,
+                 'name': product_query + '-10,0-01-ц #' + str(index)}
+                for index in range(offset, min(offset + 50, 51))]
+        return {'result': {'products': rows}, 'total': 51,
+                **({'next': offset + 50} if offset + 50 < 51 else {})}
+
+    def product_prices(params):
+        ids = [int(value[0]) for key, value in params.items() if key.startswith('filter[%40productId]') or key.startswith('filter[@productId]')]
+        assert ids, params.keys()
+        return {'result': {'prices': [{'id': product_id, 'productId': product_id,
+                                      'catalogGroupId': 1, 'price': 57900, 'currency': 'RUB'} for product_id in ids]}}
+
+    context, page, frame, calls, errors, control, held = scenario(api_routes={
+        'catalog.catalog.list': {'result': {'catalogs': [{'id': 7, 'iblockId': 7, 'productIblockId': 0}]}},
+        'catalog.product.list': product_pages,
+        'catalog.priceType.list': {'result': {'priceTypes': [{'id': 1, 'name': 'BASE', 'base': 'Y'}]}},
+        'catalog.price.list': product_prices,
+    })
+    expect(frame.locator('#connectionBadge')).to_contain_text('подключён')
+    frame.locator('#addItemBtn').click()
+    frame.locator('#productQuery').fill(product_query)
+    frame.locator('#productSearchBtn').click()
+    expect(frame.locator('#productResults .catalog-result')).to_have_count(51, timeout=15000)
+    assert starts == [['0'], ['50']], starts
+    assert not errors, errors
+    context.close()
+    passed('actual SDK reads both product pages with one correct start offset and preserves the Cyrillic name filter')
+
+    offer_starts = []
+    parent_name = 'Опора СФГ-700-10,0-01-ц'
+    def matching_parent(params):
+        pattern = params['filter[=%name]'][0]
+        assert pattern.startswith('%') and pattern.endswith('%')
+        head = {'id': 301, 'iblockId': 7, 'type': 3, 'name': parent_name, 'active': 'Y'}
+        return {'result': {'units': [head] if pattern[1:-1].lower() in parent_name.lower() else []}}
+
+    def offer_pages(params):
+        assert params['filter[iblockId]'] == ['8']
+        if 'filter[=%name]' in params:
+            assert params['filter[=%name]'][0] in ['%' + parent_name + '%', '%СФГ%', '%700%']
+            return {'result': {'offers': []}}
+        assert params['filter[parentId]'] == ['301']
+        values = params.get('start', ['0'])
+        offer_starts.append(values)
+        offset = int(values[-1])
+        rows = [{'id': 1000 + index, 'iblockId': 8, 'type': 4, 'active': 'Y',
+                 'parentId': {'value': '301'}, 'name': 'Исполнение #' + str(index)}
+                for index in range(offset, min(offset + 50, 51))]
+        return {'result': {'offers': rows}, 'total': 51,
+                **({'next': offset + 50} if offset + 50 < 51 else {})}
+
+    context, page, frame, calls, errors, control, held = scenario(api_routes={
+        'catalog.catalog.list': {'result': {'catalogs': [{'id': 7, 'iblockId': 7, 'productIblockId': 0},
+                                                        {'id': 8, 'iblockId': 8, 'productIblockId': 7}]}},
+        'catalog.product.list': {'result': {'products': []}},
+        'catalog.product.sku.list': matching_parent,
+        'catalog.product.offer.list': offer_pages,
+        'catalog.priceType.list': {'result': {'priceTypes': [{'id': 1, 'name': 'BASE', 'base': 'Y'}]}},
+        'catalog.price.list': product_prices,
+    })
+    expect(frame.locator('#connectionBadge')).to_contain_text('подключён')
+    frame.locator('#addItemBtn').click()
+    frame.locator('#productQuery').fill(parent_name)
+    frame.locator('#productSearchBtn').click()
+    expect(frame.locator('#productResults .catalog-result')).to_have_count(51, timeout=15000)
+    assert offer_starts == [['0'], ['50']], offer_starts
+    expect(frame.locator('#productResults')).to_contain_text('Исполнение #50 · вариация #1050')
+    expect(frame.locator('#productResults')).to_contain_text('основной товар: ' + parent_name)
+    for fragment in ['СФГ', '700']:
+        offer_starts.clear()
+        frame.locator('#productQuery').fill(fragment)
+        frame.locator('#productSearchBtn').click()
+        expect(frame.locator('#productResults .catalog-result')).to_have_count(51, timeout=15000)
+        assert offer_starts == [['0'], ['50']], offer_starts
+    assert not any('/rest/catalog.product.get' in call for call in calls)
+    assert not errors, errors
+    context.close()
+    passed('actual SDK searches the full parent name, Cyrillic and numeric fragments and reads 51 variations once with their own names, IDs and prices')
 
     browser.close()
 print(f'{len(checks)} connection browser checks passed.')
