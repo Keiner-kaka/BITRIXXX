@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#4267e9">
-  <meta name="application-version" content="2.1.0">
+  <meta name="application-version" content="2.2.0">
   <title>ЮЗМ · Конструктор коммерческого предложения</title>
   <link rel="stylesheet" href="styles.css">
   <script src="src/sdk-loader.js"></script>
@@ -93,7 +93,9 @@
           <div class="field wide"><div class="term-label-row"><label for="YuzmValidityTerms">Срок действия КП</label><button class="button quiet term-preset" type="button" data-term-preset="YuzmValidityTerms" aria-label="Подставить образец срока действия КП">По образцу</button></div><textarea id="YuzmValidityTerms" rows="2" placeholder="Укажите срок действия предложения"></textarea></div>
         </div>
         <details class="manager-details">
-          <summary>Данные менеджера <span class="hint">Необязательно</span></summary>
+          <summary>Подпись менеджера <span id="managerSummary" class="hint">Можно заполнить вручную</span></summary>
+          <p id="managerProfileHint" class="hint" role="status"></p>
+          <button id="fillManagerBtn" class="button quiet" type="button">Подставить данные ответственного</button>
           <div class="form-grid">
             <div class="field"><label for="YuzmManagerPosition">Должность менеджера</label><input id="YuzmManagerPosition" type="text" placeholder="Необязательно" autocomplete="organization-title"></div>
             <div class="field"><label for="YuzmManagerName">ФИО менеджера</label><input id="YuzmManagerName" type="text" placeholder="Необязательно" autocomplete="name"></div>

@@ -25,6 +25,12 @@ MOCK = r"""
   const persisted = sessionStorage.getItem('__pilot_mock_server');
   const m = window.__pilotMock = persisted ? JSON.parse(persisted) : {
     calls: [], setCount: 0, uploads: [], nextFileId: 1000, documents: {}, nextDocumentId: 500,
+    responsibleId: 27, creatorId: 99,
+    users: {
+      '27': {ID:'27',NAME:'Анна',LAST_NAME:'Соколова',WORK_POSITION:'Менеджер по продажам',WORK_PHONE:'+7 495 111-22-33',PERSONAL_MOBILE:'+7 900 000-00-00'},
+      '28': {ID:'28',NAME:'Павел',LAST_NAME:'Иванов',WORK_POSITION:'Ведущий менеджер',WORK_PHONE:'+7 495 444-55-66'},
+      '99': {ID:'99',NAME:'Создатель',LAST_NAME:'Сделки',WORK_POSITION:'Администратор',WORK_PHONE:'+7 495 999-99-99'}
+    },
     products: [
       {id:201, iblockId:7, name:'НФГ-6,0-02', type:1, price:38600},
       {id:202, iblockId:7, name:'ОГК-6', type:1, price:29000}
@@ -64,7 +70,12 @@ MOCK = r"""
       let data, error;
       switch (method) {
         case 'app.info': data={ID:'99',INSTALLED:true}; break;
-        case 'crm.deal.get': data={ID:'1048',TITLE:'Пилот КП',COMPANY_ID:1,CURRENCY_ID:'RUB',CATEGORY_ID:0}; break;
+        case 'crm.deal.get': data={ID:String(params.id),TITLE:'Пилот КП',COMPANY_ID:1,CURRENCY_ID:'RUB',CATEGORY_ID:0,ASSIGNED_BY_ID:Number(params.id)===1049 ? 28 : m.responsibleId,CREATED_BY_ID:m.creatorId}; break;
+        case 'user.get': {
+          if (m.profileError) {error=m.profileError; break;}
+          const user=m.users[String(params.FILTER.ID)];
+          data=user ? [structuredClone(user)] : []; break;
+        }
         case 'crm.company.get': data={ID:'1',TITLE:'ООО «Пилот»'}; break;
         case 'crm.deal.productrows.get': data=structuredClone(m.dealRows); break;
         case 'crm.documentgenerator.template.list': data={templates:structuredClone(m.templates)}; break;
@@ -130,10 +141,12 @@ MOCK = r"""
         default: error='ERROR_METHOD_NOT_FOUND';
       }
       persist();
-      queueMicrotask(()=>callback({
+      const deliver = ()=>callback({
         error:()=>error ? {status:400,ex:{error,error_description:'Mock API error'}} : undefined,
         data:()=>structuredClone(data), more:()=>false
-      }));
+      });
+      if (method==='user.get' && m.profileDelay && Number(params.FILTER.ID)===27) setTimeout(deliver,m.profileDelay);
+      else queueMicrotask(deliver);
     }
   };
 })();
@@ -176,6 +189,13 @@ with sync_playwright() as p:
     expect(page.locator('#documentTemplateId option[value="9"]')).to_have_count(0)
     assert doc_add_count(page) == 0
     passed('placement opens negotiated prices and registered templates without CRM/document writes')
+    expect(page.locator('#YuzmManagerName')).to_have_value('Анна Соколова')
+    expect(page.locator('#YuzmManagerPosition')).to_have_value('Менеджер по продажам')
+    expect(page.locator('#YuzmManagerPhone')).to_have_value('+7 495 111-22-33')
+    request = page.evaluate("window.__pilotMock.calls.find(call => call.method==='user.get').params")
+    assert request['FILTER'] == {'ID': 27}
+    assert request['select'] == ['ID', 'NAME', 'LAST_NAME', 'WORK_POSITION', 'WORK_PHONE']
+    passed('signature automatically uses the responsible employee and work phone, never the creator')
 
     page.locator('#settingsBtn').click()
     page.locator('#pricesFileId').fill('11')
@@ -387,7 +407,7 @@ with sync_playwright() as p:
     ]
     assert money(request['fields']['TotalSum']['VALUE']) == '13657,60'
     for field, value in DOCUMENT_FIELDS.items():
-        assert request['fields'][field]['VALUE'] == value
+        assert request['fields'][field]['VALUE'] == (value + ' ' if field == 'YuzmManagerPosition' else value)
     assert page.evaluate('(index) => JSON.stringify(window.__pilotMock.uploads[index].snapshot)', snapshot_index) == snapshot_before
     assert page.evaluate('window.__pilotMock.setCount') == 4
     assert page.evaluate('window.__pilotMock.dealRows.map(row => [row.PRODUCT_ID, row.PRICE, row.QUANTITY])') == [[201, 2109.2, 3], [202, 3665, 2]]
@@ -419,6 +439,125 @@ with sync_playwright() as p:
     assert not errors, errors
     assert not live_requests, live_requests
     passed('all mocked integration flows finish without uncaught browser errors or live portal calls')
+    # Isolated signature scenarios keep the main integration history unchanged.
+    manager_context = browser.new_context(viewport={'width':1440,'height':1100}, locale='ru-RU')
+    manager_context.add_init_script(MOCK)
+    manager_page = manager_context.new_page()
+    manager_page.on('pageerror', lambda error: errors.append(str(error)))
+    manager_page.goto(BASE, wait_until='networkidle')
+    expect(manager_page.locator('#YuzmManagerName')).to_have_value('Анна Соколова')
+    manager_page.locator('.manager-details summary').click()
+    manager_page.locator('#YuzmManagerPhone').fill('Телефон для этого КП')
+    manager_page.locator('#YuzmManagerPosition').fill('')
+    manager_page.evaluate("""() => {const m=window.__pilotMock; m.responsibleId=28;
+      sessionStorage.setItem('__pilot_mock_server',JSON.stringify(m));}""")
+    manager_page.reload(wait_until='networkidle')
+    expect(manager_page.locator('#YuzmManagerName')).to_have_value('Павел Иванов')
+    expect(manager_page.locator('#YuzmManagerPhone')).to_have_value('Телефон для этого КП')
+    expect(manager_page.locator('#YuzmManagerPosition')).to_have_value('')
+    passed('responsible changes update automatic fields while manual phone and intentional blank survive reload')
+
+    manager_page.locator('.manager-details summary').click()
+    manager_page.locator('#fillManagerBtn').click()
+    expect(manager_page.locator('#YuzmManagerPosition')).to_have_value('Ведущий менеджер')
+    expect(manager_page.locator('#YuzmManagerPhone')).to_have_value('+7 495 444-55-66')
+    manager_page.locator('#newVariantBtn').click()
+    expect(manager_page.locator('#YuzmManagerName')).to_have_value('Павел Иванов')
+    expect(manager_page.locator('#YuzmManagerPhone')).to_have_value('+7 495 444-55-66')
+    manager_page.locator('#duplicateVariantBtn').click()
+    manager_page.locator('#YuzmManagerName').fill('Имя только для копии')
+    manager_page.locator('#variantSelect').select_option(index=1)
+    expect(manager_page.locator('#YuzmManagerName')).to_have_value('Павел Иванов')
+    manager_page.locator('#variantSelect').select_option(index=0)
+    passed('profile button replaces manual signature, new variants autofill and duplicates remain independent')
+
+    manager_page.locator('#saveBtn').click()
+    expect(manager_page.locator('#status')).to_contain_text('Сохранена версия 1')
+    archive = manager_page.evaluate("JSON.stringify(JSON.parse(localStorage.getItem('yuzm-kp-prototype-v1-bitrix-pilot.bitrix.example-deal-1048')).state.variants[0].versions[0])")
+    manager_page.evaluate("""() => {const m=window.__pilotMock; m.users['28'].NAME='Новое имя';
+      m.users['28'].WORK_PHONE=''; m.users['28'].PERSONAL_MOBILE='+7 900 777-77-77';
+      sessionStorage.setItem('__pilot_mock_server',JSON.stringify(m));}""")
+    manager_page.reload(wait_until='networkidle')
+    expect(manager_page.locator('#YuzmManagerPhone')).to_have_value('')
+    expect(manager_page.locator('#managerProfileHint')).to_contain_text('заполните его вручную')
+    manager_page.locator('#historyBtn').click()
+    manager_page.locator('[data-view-version]').click()
+    expect(manager_page.locator('#quotePreview')).to_contain_text('Павел Иванов')
+    expect(manager_page.locator('#quotePreview')).to_contain_text('+7 495 444-55-66')
+    assert manager_page.evaluate("JSON.stringify(JSON.parse(localStorage.getItem('yuzm-kp-prototype-v1-bitrix-pilot.bitrix.example-deal-1048')).state.variants[0].versions[0])") == archive
+    manager_page.locator('#closeQuoteBtn').click()
+    passed('empty work phone stays empty despite mobile number, and saved signatures do not change with the profile')
+
+    manager_page.locator('.manager-details summary').click()
+    manager_page.locator('#YuzmManagerPhone').fill('Рабочий номер, введённый вручную')
+    manager_page.evaluate("""() => {const m=window.__pilotMock; m.profileError='insufficient_scope';
+      sessionStorage.setItem('__pilot_mock_server',JSON.stringify(m));}""")
+    manager_page.reload(wait_until='networkidle')
+    expect(manager_page.locator('#connectionBadge')).to_contain_text('подключён')
+    expect(manager_page.locator('#managerProfileHint')).to_contain_text('user_basic')
+    expect(manager_page.locator('#YuzmManagerPhone')).to_have_value('Рабочий номер, введённый вручную')
+    expect(manager_page.locator('#saveBtn')).to_be_enabled()
+    passed('profile scope errors do not break CRM connection or manual signature and show the required permission')
+
+    manager_page.evaluate("""() => {const m=window.__pilotMock; delete m.profileError; delete m.users['28'].WORK_PHONE;
+      sessionStorage.setItem('__pilot_mock_server',JSON.stringify(m));}""")
+    manager_page.reload(wait_until='networkidle')
+    manager_page.locator('.manager-details summary').click()
+    manager_page.locator('#fillManagerBtn').click()
+    expect(manager_page.locator('#managerProfileHint')).to_contain_text('user_basic')
+    expect(manager_page.locator('#YuzmManagerName')).to_have_value('Новое имя Иванов')
+    expect(manager_page.locator('#YuzmManagerPhone')).to_have_value('')
+    passed('omitted phone field is distinguished from an empty phone and never replaced by personal mobile')
+    manager_context.close()
+
+    delay_context = browser.new_context(viewport={'width':1440,'height':1100}, locale='ru-RU')
+    delay_context.add_init_script(MOCK + '\nwindow.__pilotMock.profileDelay=1800;')
+    delay_page = delay_context.new_page()
+    delay_page.on('pageerror', lambda error: errors.append(str(error)))
+    delay_page.goto(BASE, wait_until='networkidle')
+    delay_page.locator('.manager-details summary').click()
+    delay_page.locator('#YuzmManagerName').fill('Ручная правка во время загрузки')
+    expect(delay_page.locator('#saveBtn')).to_be_disabled()
+    expect(delay_page.locator('#YuzmManagerPosition')).to_have_value('Менеджер по продажам')
+    expect(delay_page.locator('#YuzmManagerName')).to_have_value('Ручная правка во время загрузки')
+    expect(delay_page.locator('#saveBtn')).to_be_enabled()
+    passed('late profile response preserves edits made during loading and save waits for autofill')
+    delay_context.close()
+
+    switch_context = browser.new_context(viewport={'width':1440,'height':1100}, locale='ru-RU')
+    switch_context.add_init_script(MOCK + '\nwindow.__pilotMock.profileDelay=1800;')
+    switch_page = switch_context.new_page()
+    switch_page.on('pageerror', lambda error: errors.append(str(error)))
+    switch_page.goto(BASE, wait_until='networkidle')
+    switch_page.locator('#settingsBtn').click()
+    switch_page.locator('#dealIdInput').fill('1049')
+    switch_page.locator('#connectDealBtn').click()
+    expect(switch_page.locator('#YuzmManagerName')).to_have_value('Павел Иванов')
+    switch_page.locator('#closeSettingsBtn').click()
+    # Read back the original request's completion without a blocking sleep.
+    expect(switch_page.locator('#fillManagerBtn')).to_be_enabled()
+    switch_page.wait_for_timeout(2000)
+    expect(switch_page.locator('#dealBadge')).to_contain_text('1049')
+    expect(switch_page.locator('#YuzmManagerName')).to_have_value('Павел Иванов')
+    passed('late previous-deal profile responses cannot replace the new deal signature')
+    switch_context.close()
+
+    reset_context = browser.new_context(viewport={'width':1440,'height':1100}, locale='ru-RU')
+    reset_context.add_init_script(MOCK + '\nwindow.__pilotMock.profileDelay=1800;')
+    reset_page = reset_context.new_page()
+    reset_page.on('pageerror', lambda error: errors.append(str(error)))
+    reset_page.on('dialog', lambda dialog: dialog.accept())
+    reset_page.goto(BASE, wait_until='networkidle')
+    reset_page.locator('#settingsBtn').click()
+    reset_page.locator('#resetDemoBtn').click()
+    expect(reset_page.locator('#dealBadge')).to_have_text('ПИЛОТ')
+    expect(reset_page.locator('#saveBtn')).to_be_enabled()
+    reset_page.wait_for_timeout(2000)
+    expect(reset_page.locator('#YuzmManagerName')).to_have_value('')
+    expect(reset_page.locator('#saveBtn')).to_be_enabled()
+    passed('switching to demo cancels pending profile fill without blocking saves or leaking the previous signature')
+    reset_context.close()
+    assert not errors, errors
     browser.close()
 
 print(f'{len(checks)} mocked Bitrix24 browser checks passed.')

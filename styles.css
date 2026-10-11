@@ -28,3 +28,5 @@
 @media (max-width:640px) { .connection-panel { align-items:stretch; flex-direction:column; } }
 
 .ral-field{display:flex;flex-direction:column;gap:5px;margin-top:9px}.ral-field input{width:100%}#fastenerTermsPreset+label{margin-top:8px}
+
+.manager-details #fillManagerBtn{margin:9px 0 13px}.manager-details #managerProfileHint{font-size:11px;line-height:1.6}

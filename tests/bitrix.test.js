@@ -75,6 +75,50 @@ test('SDK init reads deal placement and has no registration/write side effects',
   assert.deepEqual(sdk.calls, []);
 });
 
+test('manager signature reads the current responsible user and selects only work contact fields', async () => {
+  const profile = {ID: '27', NAME: 'Иван', LAST_NAME: 'Петров', WORK_POSITION: 'Менеджер', WORK_PHONE: '+7 495 123-45-67', PERSONAL_MOBILE: 'Do not use this'};
+  const {api, sdk} = await adapter({
+    'crm.deal.get': {data: {ID: '12', ASSIGNED_BY_ID: '27', CREATED_BY_ID: '99'}},
+    'user.get': {data: [profile]},
+  });
+  assert.deepEqual(await api.getResponsibleManager(12), {dealId: '12', userId: '27', name: 'Иван Петров', position: 'Менеджер', workPhone: '+7 495 123-45-67', phoneAvailable: true});
+  assert.deepEqual(sdk.calls.at(-1).params, {FILTER: {ID: 27}, select: ['ID', 'NAME', 'LAST_NAME', 'WORK_POSITION', 'WORK_PHONE']});
+  assert.deepEqual(sdk.calls.map(call => call.method), ['crm.deal.get', 'user.get']);
+});
+
+test('missing work phone never falls back to mobile, and omitted scope fields are distinguished', async () => {
+  for (const phone of ['', null, undefined]) {
+    const profile = {ID: 27, NAME: 'Иван', LAST_NAME: 'Петров', PERSONAL_MOBILE: '+7 900 999-99-99'};
+    if (phone !== undefined) profile.WORK_PHONE = phone;
+    const {api} = await adapter({
+      'crm.deal.get': {data: {ID: 12, ASSIGNED_BY_ID: 27}}, 'user.get': {data: [profile]},
+    });
+    const manager = await api.getResponsibleManager(12);
+    assert.equal(manager.workPhone, '');
+    assert.equal(manager.phoneAvailable, phone !== undefined);
+    assert.equal(manager.position, '');
+  }
+});
+
+test('manager lookup refuses a different user, malformed profiles and missing deal owner', async () => {
+  for (const data of [[], {}, [{ID: 99, NAME: 'Создатель'}], [{ID: 27}, {ID: 28}], [{ID: 27, NAME: {}}]]) {
+    const {api} = await adapter({
+      'crm.deal.get': {data: {ID: 12, ASSIGNED_BY_ID: 27}}, 'user.get': {data},
+    });
+    await assert.rejects(api.getResponsibleManager(12));
+  }
+  for (const deal of [{ID: 99, ASSIGNED_BY_ID: 27}, {ID: 12, CREATED_BY_ID: 99}]) {
+    const {api, sdk} = await adapter({'crm.deal.get': {data: deal}});
+    await assert.rejects(api.getResponsibleManager(12));
+    assert.equal(sdk.calls.some(call => call.method === 'user.get'), false);
+  }
+  const {api} = await adapter({
+    'crm.deal.get': {data: {ID: 12, ASSIGNED_BY_ID: 27}},
+    'user.get': {error: 'insufficient_scope', description: 'token=private'},
+  });
+  await assert.rejects(api.getResponsibleManager(12), error => error.code === 'insufficient_scope' && !error.message.includes('private'));
+});
+
 test('outside portal init returns false promptly and server deal context is supported', async () => {
   const absent = await new BitrixAdapter({ sdk: {} }).init();
   assert.deepEqual(absent, { connected: false, dealId: null });
@@ -593,6 +637,20 @@ test('RAL is transferred to the document from the saved row and leaves catalog n
   assert.equal(document.values.KpItems[1].Coating, 'Окраска RAL 9005 матовый');
   assert.equal(transfer.productRows[1].productName, 'Изделие версии Б');
   assert.equal(transfer.productRows[1].price, 6.85);
+});
+
+test('adjacent manager placeholders receive a separator without changing the saved signature text', async () => {
+  for (const position of ['Менеджер', 'Менеджер ', 'Менеджер\n', '']) {
+    const {api, sdk} = await adapter(documentRoutes());
+    const quote = documentSnapshot({documentFields: {YuzmManagerPosition: position, YuzmManagerName: 'Иван Петров', YuzmManagerPhone: '+7 495 111-22-33'}});
+    const original = structuredClone(quote);
+    await api.createQuoteDocument(12, 39, quote);
+    const fields = sdk.calls.find(call => call.method === 'crm.documentgenerator.document.add').params.fields;
+    assert.equal(fields.YuzmManagerPosition.VALUE, position === 'Менеджер' ? 'Менеджер ' : position);
+    assert.equal(fields.YuzmManagerName.VALUE, 'Иван Петров');
+    assert.equal(fields.YuzmManagerPhone.VALUE, '+7 495 111-22-33');
+    assert.deepEqual(quote, original);
+  }
 });
 
 test('transfer errors, unverified readback and concurrent edits prevent document creation', async () => {

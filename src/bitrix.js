@@ -2,7 +2,7 @@
 import { parseNumber, formatCoating } from './calculator.js';
 
 const ALLOWED_METHODS = new Set([
-  'app.info',
+  'app.info', 'user.get',
   'crm.deal.get', 'crm.deal.productrows.get', 'crm.deal.productrows.set',
   'crm.item.productrow.set', 'crm.company.get', 'crm.contact.get',
   'crm.catalog.list', 'crm.product.list', 'crm.product.get',
@@ -468,6 +468,25 @@ export class BitrixAdapter {
     return { id: dealId, categoryId: String(categoryId), currency: currency(deal.CURRENCY_ID) };
   }
 
+  /** Read only the current deal owner's signature; never use the creator or mobile phone. */
+  async getResponsibleManager(value) {
+    const dealId = id(value, 'ID сделки');
+    const deal = await this.call('crm.deal.get', {id: Number(dealId)});
+    if (String(deal?.ID) !== dealId) throw new Error('Bitrix24 не подтвердил выбранную сделку.');
+    const userId = id(deal.ASSIGNED_BY_ID, 'ID ответственного за сделку');
+    const users = await this.call('user.get', {
+      FILTER: {ID: Number(userId)}, select: ['ID', 'NAME', 'LAST_NAME', 'WORK_POSITION', 'WORK_PHONE'],
+    });
+    if (!Array.isArray(users) || users.length !== 1 || String(users[0]?.ID) !== userId) {
+      throw new Error('Bitrix24 не вернул профиль ответственного за сделку. Заполните подпись вручную.');
+    }
+    const user = users[0];
+    const text = key => documentText(user[key], `Профиль сотрудника: ${key}`).trim();
+    return {dealId, userId, name: [text('NAME'), text('LAST_NAME')].filter(Boolean).join(' '),
+      position: text('WORK_POSITION'), workPhone: text('WORK_PHONE'),
+      phoneAvailable: Object.hasOwn(user, 'WORK_PHONE')};
+  }
+
   async listDocumentTemplates(dealValue) {
     const deal = await this._documentDeal(dealValue);
     const templates = await this._list('crm.documentgenerator.template.list', {
@@ -564,6 +583,10 @@ export class BitrixAdapter {
     for (const placeholder of DOCUMENT_FIELDS) {
       fields[placeholder] = { VALUE: documentText(snapshot.documentFields?.[placeholder], placeholder) };
     }
+    // The supplied DOCX places position and name directly next to each other.
+    // Keep saved text unchanged and separate the two values in the document.
+    if (fields.YuzmManagerPosition.VALUE.trim() && fields.YuzmManagerName.VALUE.trim()
+      && !/\s$/.test(fields.YuzmManagerPosition.VALUE)) fields.YuzmManagerPosition.VALUE += ' ';
     const deal = await this._documentDeal(dealId);
     if (deal.currency !== quoteCurrency) throw new Error('Валюта сделки отличается от валюты КП.');
     const response = await this.call('crm.documentgenerator.template.get', { id: Number(templateId) });

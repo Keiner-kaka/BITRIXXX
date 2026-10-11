@@ -12,8 +12,10 @@ let config, calculation, state, metalPrices = null, connected = false, busy = fa
 let connecting = false, connectionCode = 'NOT_STARTED';
 let catalogProducts = clone(demoProducts), priceMeta = {source: 'demo'}, metalPriceMeta = {source: 'demo'};
 let templates = [], templatesLoaded = false;
+let managerProfile = null, managerLoading = false, managerRequest = 0, managerMessage = '';
 let previewFingerprint = null;
 const documentFieldNames = ['YuzmPaymentTerms', 'YuzmFastenerTerms', 'YuzmDocumentsTerms', 'YuzmDeliveryTerms', 'YuzmValidityTerms', 'YuzmManagerPosition', 'YuzmManagerName', 'YuzmManagerPhone'];
+const managerFields = ['YuzmManagerPosition', 'YuzmManagerName', 'YuzmManagerPhone'];
 const paymentPresets = {
   '40_60': '40% предоплата + 60% по факту готовности к отгрузке.',
   '50_50': '50% предоплата + 50% по факту готовности к отгрузке.',
@@ -70,7 +72,7 @@ function settingsMessage(message) {
 function openDialog(id) { $(id).showModal(); }
 function closeDialog(id) { $(id).close(); }
 function blankDraft(rows = []) {
-  return {companyName: 'ООО «КраснодарЭлектро»', rows, currency: 'RUB', documentTemplateId: state?.settings?.defaultDocumentTemplateId || '', documentFields: clone(defaultDocumentFields)};
+  return {companyName: 'ООО «КраснодарЭлектро»', rows, currency: 'RUB', documentTemplateId: state?.settings?.defaultDocumentTemplateId || '', documentFields: clone(defaultDocumentFields), managerOverrides: {}};
 }
 function makeVariant(name, draftValue) { return {id: uid(), name, draft: draftValue, versions: [], documents: []}; }
 function freshState() {
@@ -98,6 +100,7 @@ function readStored(scope) {
       delete variant.draft.shipmentDate;
       if (variant.context?.metalPrices) validateMetalPrices(variant.context.metalPrices);
       variant.draft.documentFields = {...clone(defaultDocumentFields), ...value.state.settings?.documentFields, ...variant.draft.documentFields};
+      ensureManagerOverrides(variant.draft);
       variant.documents = Array.isArray(variant.documents) ? variant.documents : [];
     }
     if (!value.state.variants.some(v => v.id === value.state.selectedVariantId)) return null;
@@ -143,6 +146,67 @@ function renderTerms() {
   for (const key of documentFieldNames) $(key).value = draft().documentFields[key] || '';
   $('paymentTermsPreset').value = Object.keys(paymentPresets).find(key => paymentPresets[key] === draft().documentFields.YuzmPaymentTerms) || '';
   $('fastenerTermsPreset').value = Object.keys(fastenerPresets).find(key => fastenerPresets[key] === draft().documentFields.YuzmFastenerTerms) || '';
+  renderManagerControls();
+}
+
+function ensureManagerOverrides(target) {
+  // Existing nonempty signatures predate auto-fill and are treated as manual.
+  if (!target.managerOverrides || typeof target.managerOverrides !== 'object' || Array.isArray(target.managerOverrides)) {
+    target.managerOverrides = Object.fromEntries(managerFields.map(key => [key, Boolean(target.documentFields?.[key])]));
+  }
+  return target.managerOverrides;
+}
+function applyManagerProfile(variants, force = false) {
+  if (!managerProfile || managerProfile.dealId !== String(state.activeDealId) || state.scope === 'demo') return;
+  const values = {YuzmManagerPosition: managerProfile.position, YuzmManagerName: managerProfile.name, YuzmManagerPhone: managerProfile.workPhone};
+  for (const variant of variants) {
+    const overrides = ensureManagerOverrides(variant.draft);
+    for (const key of managerFields) {
+      if (!force && overrides[key]) continue;
+      variant.draft.documentFields[key] = values[key];
+      overrides[key] = false;
+    }
+  }
+}
+function renderManagerControls() {
+  const inDeal = connected && state.scope !== 'demo' && state.activeDealId;
+  $('fillManagerBtn').disabled = !inDeal || busy || managerLoading;
+  $('managerSummary').textContent = managerLoading ? 'Загрузка профиля…'
+    : draft().documentFields?.YuzmManagerName || 'Можно заполнить вручную';
+  let message = inDeal ? managerMessage : 'Имя, должность и рабочий телефон ответственного подставляются при открытии сделки.';
+  if (inDeal && managerProfile && !draft().documentFields.YuzmManagerPhone) {
+    message += managerProfile.phoneAvailable
+      ? ' Рабочий телефон в профиле не указан — заполните его вручную.'
+      : ' Для чтения рабочего телефона добавьте разрешение «Пользователи (базовый) — user_basic» или заполните его вручную.';
+  }
+  $('managerProfileHint').textContent = message;
+}
+async function refreshManagerProfile(force = false) {
+  if (!connected || state.scope === 'demo' || !state.activeDealId || busy || managerLoading) return;
+  const dealId = String(state.activeDealId), scope = state.scope, variantId = state.selectedVariantId;
+  const request = ++managerRequest;
+  managerLoading = true;
+  managerMessage = 'Получаю данные ответственного за сделку…';
+  recalc(); renderManagerControls();
+  try {
+    const profile = await adapter.getResponsibleManager(dealId);
+    if (request !== managerRequest || state.scope !== scope || String(state.activeDealId) !== dealId) return;
+    managerProfile = profile;
+    const variants = force ? state.variants.filter(variant => variant.id === variantId) : state.variants;
+    applyManagerProfile(variants, force);
+    managerMessage = 'Ответственный: ' + (profile.name || 'сотрудник #' + profile.userId) + '. Поля подписи можно изменить вручную.';
+    renderTerms(); remember();
+  } catch (error) {
+    if (request !== managerRequest || state.scope !== scope) return;
+    managerProfile = null;
+    managerMessage = 'Автозаполнение недоступно. Проверьте разрешение «Пользователи (базовый) — user_basic» и доступ к профилю или заполните подпись вручную. ' + safeError(error);
+    renderManagerControls();
+  } finally {
+    if (request === managerRequest && state.scope === scope) {
+      managerLoading = false;
+      recalc(); renderManagerControls();
+    }
+  }
 }
 function withoutRetiredFields(rows) {
   return rows.map(row => {
@@ -229,11 +293,13 @@ function recalc() {
     }
 
   }
-  $('saveBtn').disabled = busy || !calculation.valid;
-  $('createQuoteBtn').disabled = !calculation.valid;
-  $('applyDealBtn').disabled = !connected || !calculation.valid || busy;
+  $('saveBtn').disabled = busy || managerLoading || !calculation.valid;
+  $('createQuoteBtn').disabled = busy || managerLoading || !calculation.valid;
+  $('applyDealBtn').disabled = !connected || !calculation.valid || busy || managerLoading;
+  $('downloadBtn').disabled = busy || managerLoading;
   for (const id of ['variantSelect', 'newVariantBtn', 'duplicateVariantBtn', 'connectDealBtn', 'resetDemoBtn']) $(id).disabled = busy;
   renderDocumentControls();
+  renderManagerControls();
   remember();
 }
 function renderDocuments() {
@@ -420,7 +486,7 @@ function buildSnapshot() {
   };
 }
 async function saveVersion() {
-  if (busy) return;
+  if (busy || managerLoading) return;
   busy = true; recalc();
   try {
     const snapshot = buildSnapshot();
@@ -580,6 +646,7 @@ function chooseProduct(product) {
 async function connectDeal(id) {
   if (!connected) throw new Error(adapter.connectionError?.message || 'Соединение с Битрикс24 не установлено. Проверьте диагностику подключения в настройках.');
   if (!/^[1-9]\d*$/.test(String(id))) throw new Error('Укажите ID сделки.');
+  managerRequest++; managerProfile = null; managerLoading = false; managerMessage = '';
   const deal = await adapter.loadDeal(id);
   const scope = 'bitrix-' + (window.BX24?.getDomain?.() || window.location.host) + '-deal-' + id;
   const savedSettings = {...state.settings, dealId: String(id)};
@@ -606,17 +673,18 @@ async function connectDeal(id) {
         validateConfig(snapshot.config);
         let v = state.variants.find(v => v.id === snapshot.variantId);
         if (!v) {
-          v = {id: snapshot.variantId, name: snapshot.variantName || 'Вариант', draft: {companyName: snapshot.companyName, rows: migrateRows(clone(snapshot.rows), snapshot.config, snapshot.metalPrices), currency: snapshot.currency, documentTemplateId: snapshot.documentTemplateId || '', documentFields: {...clone(defaultDocumentFields), ...snapshot.documentFields}}, versions: [], documents: [],
+          v = {id: snapshot.variantId, name: snapshot.variantName || 'Вариант', draft: {companyName: snapshot.companyName, rows: migrateRows(clone(snapshot.rows), snapshot.config, snapshot.metalPrices), currency: snapshot.currency, documentTemplateId: snapshot.documentTemplateId || '', documentFields: {...clone(defaultDocumentFields), ...snapshot.documentFields}, managerOverrides: Object.fromEntries(managerFields.map(key => [key, true]))}, versions: [], documents: [],
             context: {config: clone(snapshot.config), priceMeta: clone(snapshot.priceMeta || {}), metalPrices: clone(snapshot.metalPrices || null), metalPriceMeta: clone(snapshot.metalPriceMeta || {source: 'unconfigured'})}};
           state.variants.push(v);
         }
         if (!v.versions.some(x => x.snapshotId === snapshot.snapshotId)) v.versions.push({...snapshot, storage: 'disk'});
       }
-    } catch (error) { status('Сделка загружена, общая история недоступна: ' + safeError(error), 'error'); render(); return; }
+    } catch (error) { status('Сделка загружена, общая история недоступна: ' + safeError(error), 'error'); render(); await refreshManagerProfile(); return; }
   }
   templates = []; templatesLoaded = false;
   render(); settingsToForm();
   await refreshTemplates();
+  await refreshManagerProfile();
   status('Сделка #' + id + ' загружена. Существующие строки используют цену сделки; для базовой цены выберите товар из каталога.', 'success');
 }
 async function applyToDeal() {
@@ -647,6 +715,7 @@ async function applyToDeal() {
 function bindEvents() {
   for (const key of documentFieldNames) $(key).addEventListener('input', e => {
     draft().documentFields[key] = e.target.value;
+    if (managerFields.includes(key)) { ensureManagerOverrides(draft())[key] = true; renderManagerControls(); }
     if (key === 'YuzmPaymentTerms') $('paymentTermsPreset').value = Object.keys(paymentPresets).find(k => paymentPresets[k] === e.target.value) || '';
     if (key === 'YuzmFastenerTerms') $('fastenerTermsPreset').value = Object.keys(fastenerPresets).find(k => fastenerPresets[k] === e.target.value) || '';
     remember();
@@ -669,8 +738,10 @@ function bindEvents() {
   $('refreshTemplatesBtn').addEventListener('click', refreshTemplates);
   $('generateDocumentBtn').addEventListener('click', generateDocument);
   $('refreshDocumentBtn').addEventListener('click', refreshDocument);
+  $('fillManagerBtn').addEventListener('click', () => refreshManagerProfile(true));
   $('newVariantBtn').addEventListener('click', () => {
     const v = makeVariant('Вариант ' + (state.variants.length + 1), {...blankDraft([]), companyName: draft().companyName, currency: config.currency});
+    applyManagerProfile([v]);
     state.variants.push(v); state.selectedVariantId = v.id; render();
   });
   $('duplicateVariantBtn').addEventListener('click', () => {
@@ -728,6 +799,7 @@ function bindEvents() {
       metalPriceMeta = clone(snapshot.metalPriceMeta || {source: 'unconfigured'});
       currentVariant().draft.documentTemplateId = snapshot.documentTemplateId || '';
       currentVariant().draft.documentFields = {...clone(defaultDocumentFields), ...snapshot.documentFields};
+      currentVariant().draft.managerOverrides = Object.fromEntries(managerFields.map(key => [key, true]));
       state.settings.formulaMode = config.formulaMode; state.settings.rounding = config.rounding;
       closeDialog('historyDialog'); render(); status('Версия ' + snapshot.version + ' скопирована в черновик. История сохранена.', 'success');
     }
@@ -764,6 +836,7 @@ function bindEvents() {
   });
   $('resetDemoBtn').addEventListener('click', async () => {
     if (!window.confirm('Открыть новый демонстрационный черновик? Сохранённые данные сделки останутся в браузере.')) return;
+    managerRequest++; managerProfile = null; managerLoading = false; managerMessage = '';
     state = freshState(); config = validateConfig(await (await fetch('data/coatings.example.json')).json());
     metalPrices = validateMetalPrices(await (await fetch('data/metal-prices.example.json')).json());
     metalPriceMeta = {source: 'demo'}; priceMeta = {source: 'demo'}; catalogProducts = clone(demoProducts);
