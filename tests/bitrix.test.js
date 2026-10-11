@@ -343,6 +343,7 @@ test('existing VAT metadata is normalized and preserved during full deal replace
 
 function documentRoutes(overrides = {}) {
   return {
+    ...dealRoutes().routes,
     'crm.deal.get': { data: { ID: '12', CATEGORY_ID: '3', CURRENCY_ID: 'RUB', TITLE: 'Текущая сделка' } },
     'crm.documentgenerator.template.get': { data: { template: {
       id: '39', name: 'КП ЮЗМ', active: 'Y', isDeleted: 'N', entityTypeId: ['2_category_3'],
@@ -414,7 +415,7 @@ test('template listing keeps access errors and never exposes auth descriptions',
     && !error.message.includes('secret'));
 });
 
-test('document payload uses the exact saved KP rows, shared table aliases and independent terms without deal writes', async () => {
+test('document creation transfers the saved KP rows before creating a document with matching fields', async () => {
   const { api, sdk } = await adapter(documentRoutes());
   const quote = documentSnapshot({ documentFields: {
     YuzmPaymentTerms: 'Аванс 50%', YuzmManagerName: 'Иван Петров',
@@ -453,9 +454,11 @@ test('document payload uses the exact saved KP rows, shared table aliases and in
   assert.equal('DocumentNumber' in request.fields, false);
   assert.equal('DocumentCreateTime' in request.fields, false);
   assert.equal('arbitrary' in request.fields, false);
-  assert.deepEqual(sdk.calls.map(call => call.method), [
-    'crm.deal.get', 'crm.documentgenerator.template.get', 'crm.documentgenerator.document.add',
-  ]);
+  const writeIndex = sdk.calls.findIndex(call => call.method === 'crm.item.productrow.set');
+  const readbackIndex = sdk.calls.findLastIndex(call => call.method === 'crm.deal.productrows.get');
+  const addIndex = sdk.calls.findIndex(call => call.method === 'crm.documentgenerator.document.add');
+  assert.ok(writeIndex > 0 && readbackIndex > writeIndex && addIndex > readbackIndex);
+  assert.deepEqual(sdk.calls[writeIndex].params.productRows.map(row => [row.productId, row.price, row.quantity]), [[101, 100.25, 2], [102, 6.85, 3]]);
 });
 
 test('document quantity accepts calculator numeric syntax and preserves entered commercial text', async () => {
@@ -507,6 +510,7 @@ test('document creation rejects missing, deactivated, deleted and wrong-category
     }));
     await assert.rejects(api.createQuoteDocument(12, 39, documentSnapshot()), /шаблон/i);
     assert.equal(sdk.calls.some(call => call.method.endsWith('.add')), false);
+    assert.equal(sdk.calls.some(call => call.method.endsWith('.set')), false);
   }
 });
 
@@ -576,6 +580,38 @@ test('document refresh obtains asynchronous PDF with portal-relative URLs withou
   assert.equal(sdk.calls.filter(call => call.method.endsWith('.add')).length, 1);
   assert.equal(sdk.calls.at(-1).method, 'crm.documentgenerator.document.get');
   assert.deepEqual(sdk.calls.at(-1).params, { id: 61 });
+});
+
+test('RAL is transferred to the document from the saved row and leaves catalog names intact', async () => {
+  const { api, sdk } = await adapter(documentRoutes());
+  const quote = documentSnapshot();
+  quote.config.coatings[1] = {code: 'paint', name: 'Окраска', supportsRal: true};
+  quote.rows[1].ralColor = '9005 матовый';
+  await api.createQuoteDocument(12, 39, quote);
+  const document = sdk.calls.find(call => call.method === 'crm.documentgenerator.document.add').params;
+  const transfer = sdk.calls.find(call => call.method === 'crm.item.productrow.set').params;
+  assert.equal(document.values.KpItems[1].Coating, 'Окраска RAL 9005 матовый');
+  assert.equal(transfer.productRows[1].productName, 'Изделие версии Б');
+  assert.equal(transfer.productRows[1].price, 6.85);
+});
+
+test('transfer errors, unverified readback and concurrent edits prevent document creation', async () => {
+  for (const mode of ['denied', 'readback', 'conflict']) {
+    const routes = documentRoutes();
+    if (mode === 'denied') routes['crm.item.productrow.set'] = {error: 'ACCESS_DENIED'};
+    if (mode === 'readback') routes['crm.item.productrow.set'] = () => ({data: true});
+    if (mode === 'conflict') {
+      const original = routes['catalog.product.get'];
+      routes['catalog.product.get'] = params => {
+        routes['crm.deal.productrows.get'] = () => ({data: [{PRODUCT_ID: 101, PRICE: 200, QUANTITY: 999}]});
+        return original(params);
+      };
+    }
+    const {api, sdk} = await adapter(routes);
+    await assert.rejects(api.createQuoteDocument(12, 39, documentSnapshot()));
+    assert.equal(sdk.calls.some(call => call.method === 'crm.documentgenerator.document.add'), false);
+    if (mode === 'conflict') assert.equal(sdk.calls.some(call => call.method.endsWith('.set')), false);
+  }
 });
 
 test('document responses reject unsafe links and different IDs without revealing returned URL contents', async () => {

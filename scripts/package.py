@@ -73,8 +73,8 @@ def build():
         'version': version,
         'validation': {
             'node_test_files_passed': 3,
-            'browser_ui_checks_passed': 20,
-            'browser_mock_bitrix_checks_passed': 14,
+            'browser_ui_checks_passed': 23,
+            'browser_mock_bitrix_checks_passed': 18,
             'browser_connection_checks_passed': 7,
             'live_bitrix_tested': False,
             'uploaded_template_preserved': True,

@@ -1,10 +1,11 @@
-import {calculateQuote, formatMoney, validateConfig, validateMetalPrices} from './calculator.js';
+import {calculateQuote, formatMoney, validateConfig as normalizeConfig, validateMetalPrices, withCoatingOptions, coatingSupportsRal, formatCoating} from './calculator.js';
 import {BitrixAdapter, fingerprintRows} from './bitrix.js';
 import {products as demoProducts, initialRows, newRow} from './demo.js';
 
 const $ = id => document.getElementById(id);
 const clone = value => structuredClone(value);
 const uid = () => crypto.randomUUID();
+const validateConfig = raw => withCoatingOptions(normalizeConfig(raw));
 const adapter = new BitrixAdapter();
 const STORE = 'yuzm-kp-prototype-v1';
 let config, calculation, state, metalPrices = null, connected = false, busy = false, chosenRow = null;
@@ -18,9 +19,14 @@ const paymentPresets = {
   '50_50': '50% предоплата + 50% по факту готовности к отгрузке.',
   '100': '100% предоплата.'
 };
+const fastenerPresets = {
+  bolts: 'В стоимость включен крепеж на базе болтов (гальваническое покрытие).',
+  excluded: 'Крепеж в комплект не входит.',
+  studs: 'В стоимость включен крепеж на базе шпилек (гальваническое покрытие).'
+};
 const defaultDocumentFields = {
   YuzmPaymentTerms: paymentPresets['50_50'],
-  YuzmFastenerTerms: 'В стоимость включен крепеж (гальваническое покрытие).',
+  YuzmFastenerTerms: fastenerPresets.bolts,
   YuzmDocumentsTerms: 'На продукцию выдается паспорт, сертификат соответствия.',
   YuzmDeliveryTerms: 'Доставка в г. Краснодар, Ставропольская, 19 производится силами поставщика.',
   YuzmValidityTerms: 'КП действительно в течение трех рабочих дней.',
@@ -64,7 +70,7 @@ function settingsMessage(message) {
 function openDialog(id) { $(id).showModal(); }
 function closeDialog(id) { $(id).close(); }
 function blankDraft(rows = []) {
-  return {companyName: 'ООО «КраснодарЭлектро»', shipmentDate: '', rows, currency: 'RUB', documentTemplateId: state?.settings?.defaultDocumentTemplateId || '', documentFields: clone(defaultDocumentFields)};
+  return {companyName: 'ООО «КраснодарЭлектро»', rows, currency: 'RUB', documentTemplateId: state?.settings?.defaultDocumentTemplateId || '', documentFields: clone(defaultDocumentFields)};
 }
 function makeVariant(name, draftValue) { return {id: uid(), name, draft: draftValue, versions: [], documents: []}; }
 function freshState() {
@@ -89,6 +95,7 @@ function readStored(scope) {
     for (const variant of value.state.variants) {
       if (!variant.id || typeof variant.name !== 'string' || !Array.isArray(variant.draft?.rows) || !Array.isArray(variant.versions)) return null;
       variant.draft.rows = migrateRows(variant.draft.rows, variant.context?.config || value.config, variant.context?.metalPrices || value.metalPrices);
+      delete variant.draft.shipmentDate;
       if (variant.context?.metalPrices) validateMetalPrices(variant.context.metalPrices);
       variant.draft.documentFields = {...clone(defaultDocumentFields), ...value.state.settings?.documentFields, ...variant.draft.documentFields};
       variant.documents = Array.isArray(variant.documents) ? variant.documents : [];
@@ -130,17 +137,17 @@ function renderVariants() {
   $('variantSelect').value = state.selectedVariantId;
   $('variantName').value = currentVariant().name;
   $('companyName').value = draft().companyName || '';
-  $('shipmentDate').value = draft().shipmentDate || '';
 }
 function renderTerms() {
   draft().documentFields ||= clone(defaultDocumentFields);
   for (const key of documentFieldNames) $(key).value = draft().documentFields[key] || '';
   $('paymentTermsPreset').value = Object.keys(paymentPresets).find(key => paymentPresets[key] === draft().documentFields.YuzmPaymentTerms) || '';
+  $('fastenerTermsPreset').value = Object.keys(fastenerPresets).find(key => fastenerPresets[key] === draft().documentFields.YuzmFastenerTerms) || '';
 }
 function withoutRetiredFields(rows) {
   return rows.map(row => {
     const clean = {...row};
-    for (const field of ['drawingId', 'coatingFactor', 'extraCoating', 'delivery']) delete clean[field];
+    for (const field of ['drawingId', 'coatingFactor', 'extraCoating', 'delivery', 'nonstandard']) delete clean[field];
     return clean;
   });
 }
@@ -155,6 +162,7 @@ function migrateRows(rows, rawConfig, prices = null) {
     row.weight ??= '';
     row.fasteners ??= '0';
     row.executionTerm ??= '';
+    row.ralColor ??= '';
     return row;
   });
 }
@@ -177,7 +185,11 @@ function renderRows() {
       ]),
       cell('item-coating', [
         select(config.coatings.map(c => ({value: c.code, text: c.name})), row.coatingCode, {'data-field': 'coatingCode', 'aria-label': 'Покрытие позиции'}),
-        element('div', {class: 'hint', text: 'Наименование для КП'})
+        ...(coatingSupportsRal(config.coatings.find(c => c.code === row.coatingCode)) ? [
+          element('label', {class: 'mini-label ral-field', text: 'Номер RAL'}, [
+            input(row.ralColor || '', 'ralColor', 'Номер цвета RAL', {placeholder: '9005', maxlength: '100'})
+          ])
+        ] : [])
       ]),
       cell('item-quantity', [input(row.quantity, 'quantity', 'Количество позиции', {inputmode: 'decimal'})]),
       cell('item-coefficients', [element('div', {class: 'coef-grid coeffs-three'}, [
@@ -187,10 +199,6 @@ function renderRows() {
         element('label', {class: 'mini-label', text: 'К3 · покраска'}, [input(row.k3, 'k3', 'Коэффициент покраски и покрытия', {inputmode: 'decimal'})])
       ])]),
       cell('item-execution', [input(row.executionTerm || '', 'executionTerm', 'Срок исполнения позиции', {placeholder: '15 рабочих дней', maxlength: '250'})]),
-      cell('item-conditions', [element('label', {class: 'check-label'}, [
-        input('', 'nonstandard', 'Нестандартная позиция', {type: 'checkbox', checked: row.nonstandard}),
-        element('span', {text: 'Нестандарт'})
-      ])]),
       cell('item-remove', [element('button', {type: 'button', class: 'icon-button', 'data-action': 'remove', text: '×', 'aria-label': 'Удалить позицию'})]),
       element('div', {class: 'item-summary', 'data-summary': row.id})
     ]);
@@ -313,7 +321,7 @@ function renderDocumentControls() {
   if (record) {
     $('documentResult').append(element('p', {text: 'Документ #' + record.id + (record.conversionError ? ' создан, но Битрикс24 сообщил об ошибке преобразования PDF.' : record.pdfUrl ? ' готов.' : ' создан. PDF ещё формируется — обновите его готовность.')}), ...documentLinks(record));
   } else if (snapshot) {
-    $('documentResult').textContent = canCreate ? 'Документ будет создан из этой сохранённой версии по шаблону #' + previewTemplateId(snapshot) + '.'
+    $('documentResult').textContent = canCreate ? 'Товары этой версии заменят товары сделки. После проверки записи будет создан документ по шаблону #' + previewTemplateId(snapshot) + '.'
       : 'Для генерации документа подключите сделку и выберите зарегистрированный шаблон.';
   }
 }
@@ -324,7 +332,7 @@ async function generateDocument() {
     if (!snapshot || !templateId || !connected || state.scope === 'demo') throw new Error('Подключите сделку и выберите шаблон КП.');
     if (previewDocument(snapshot)) return;
     busy = true; recalc();
-    status('Создаю документ из выбранной версии КП…');
+    status('Переношу товары выбранной версии в сделку и создаю документ КП…');
     const result = await adapter.createQuoteDocument(state.activeDealId, templateId, snapshot);
     variant.documents ||= [];
     variant.documents.push({...result, templateId, snapshotId: snapshot.snapshotId, createdAt: new Date().toISOString()});
@@ -336,7 +344,7 @@ async function generateDocument() {
       variant.documents.push({id: String(error.documentId), title: 'Документ #' + error.documentId, templateId, snapshotId: snapshot.snapshotId, createdAt: new Date().toISOString()});
       remember(); renderDocuments();
       status('Битрикс24 создал документ #' + error.documentId + ', но его данные не удалось подтвердить. Нажмите «Обновить PDF» для повторного чтения документа.', 'error');
-    } else status(safeError(error), 'error');
+    } else status((error.goodsTransferred ? 'Товары перенесены в сделку. Создание документа не подтверждено. ' : '') + safeError(error), 'error');
   }
   finally { busy = false; recalc(); }
 }
@@ -404,7 +412,7 @@ function buildSnapshot() {
   return {
     schemaVersion: 2, snapshotId: uid(), dealId: state.scope === 'demo' ? null : String(state.activeDealId),
     variantId: variant.id, variantName: variant.name, version, createdAt: new Date().toISOString(),
-    companyName: draft().companyName, shipmentDate: draft().shipmentDate, currency: config.currency,
+    companyName: draft().companyName, currency: config.currency,
     rows: withoutRetiredFields(clone(calculation.rows)), total: calculation.total, quantity: calculation.quantity,
     config: clone(config), priceMeta: clone(priceMeta), metalPrices: clone(metalPrices), metalPriceMeta: clone(metalPriceMeta),
     documentTemplateId: selectedTemplateId(), documentFields: clone(draft().documentFields || {}),
@@ -468,7 +476,7 @@ function showQuote(snapshot) {
   for (const row of snapshot.rows) {
     const coating = snapshot.config.coatings.find(c => c.code === row.coatingCode);
     tbody.append(element('tr', {}, [
-      row.productName, coating?.name || row.coatingCode, String(row.quantity),
+      row.productName, formatCoating(coating || {code: row.coatingCode, name: row.coatingName || row.coatingCode}, row.ralColor), String(row.quantity),
       formatMoney(row.unitPrice, snapshot.currency), formatMoney(row.lineTotal, snapshot.currency), row.executionTerm || '—'
     ].map(text => element('td', {text}))));
   }
@@ -598,7 +606,7 @@ async function connectDeal(id) {
         validateConfig(snapshot.config);
         let v = state.variants.find(v => v.id === snapshot.variantId);
         if (!v) {
-          v = {id: snapshot.variantId, name: snapshot.variantName || 'Вариант', draft: {companyName: snapshot.companyName, shipmentDate: snapshot.shipmentDate, rows: migrateRows(clone(snapshot.rows), snapshot.config, snapshot.metalPrices), currency: snapshot.currency, documentTemplateId: snapshot.documentTemplateId || '', documentFields: {...clone(defaultDocumentFields), ...snapshot.documentFields}}, versions: [], documents: [],
+          v = {id: snapshot.variantId, name: snapshot.variantName || 'Вариант', draft: {companyName: snapshot.companyName, rows: migrateRows(clone(snapshot.rows), snapshot.config, snapshot.metalPrices), currency: snapshot.currency, documentTemplateId: snapshot.documentTemplateId || '', documentFields: {...clone(defaultDocumentFields), ...snapshot.documentFields}}, versions: [], documents: [],
             context: {config: clone(snapshot.config), priceMeta: clone(snapshot.priceMeta || {}), metalPrices: clone(snapshot.metalPrices || null), metalPriceMeta: clone(snapshot.metalPriceMeta || {source: 'unconfigured'})}};
           state.variants.push(v);
         }
@@ -640,17 +648,20 @@ function bindEvents() {
   for (const key of documentFieldNames) $(key).addEventListener('input', e => {
     draft().documentFields[key] = e.target.value;
     if (key === 'YuzmPaymentTerms') $('paymentTermsPreset').value = Object.keys(paymentPresets).find(k => paymentPresets[k] === e.target.value) || '';
+    if (key === 'YuzmFastenerTerms') $('fastenerTermsPreset').value = Object.keys(fastenerPresets).find(k => fastenerPresets[k] === e.target.value) || '';
     remember();
   });
   $('paymentTermsPreset').addEventListener('change', e => {
     if (paymentPresets[e.target.value]) { draft().documentFields.YuzmPaymentTerms = paymentPresets[e.target.value]; renderTerms(); remember(); }
+  });
+  $('fastenerTermsPreset').addEventListener('change', e => {
+    if (fastenerPresets[e.target.value]) { draft().documentFields.YuzmFastenerTerms = fastenerPresets[e.target.value]; renderTerms(); remember(); }
   });
   document.querySelectorAll('[data-term-preset]').forEach(button => button.addEventListener('click', () => {
     const key = button.dataset.termPreset;
     if (defaultDocumentFields[key]) { draft().documentFields[key] = defaultDocumentFields[key]; renderTerms(); remember(); }
   }));
   $('companyName').addEventListener('input', e => { draft().companyName = e.target.value; remember(); });
-  $('shipmentDate').addEventListener('input', e => { draft().shipmentDate = e.target.value; remember(); });
   $('variantName').addEventListener('input', e => { currentVariant().name = e.target.value.trim() || 'Без названия'; remember(); });
   $('variantName').addEventListener('change', renderVariants);
   $('variantSelect').addEventListener('change', e => activateVariant(e.target.value));
@@ -710,7 +721,7 @@ function bindEvents() {
     const snapshot = currentVariant().versions.find(s => s.snapshotId === (view || restoreId)); if (!snapshot) return;
     if (view) { closeDialog('historyDialog'); showQuote(snapshot); }
     else {
-      currentVariant().draft = {companyName: snapshot.companyName, shipmentDate: snapshot.shipmentDate, currency: snapshot.currency, rows: migrateRows(clone(snapshot.rows), snapshot.config, snapshot.metalPrices)};
+      currentVariant().draft = {companyName: snapshot.companyName, currency: snapshot.currency, rows: migrateRows(clone(snapshot.rows), snapshot.config, snapshot.metalPrices)};
       config = validateConfig(snapshot.config);
       priceMeta = clone(snapshot.priceMeta || {});
       metalPrices = snapshot.metalPrices ? validateMetalPrices(snapshot.metalPrices) : null;

@@ -1,3 +1,4 @@
+import os
 """Exercise the real UI against a mocked Bitrix24 SDK; never call a live portal.
 
 Run a server on localhost:8080 first, then python tests/browser_bitrix.py.
@@ -6,7 +7,7 @@ Requires Playwright and system Chromium, as in browser_smoke.py.
 import re
 from playwright.sync_api import sync_playwright, expect
 
-BASE = 'http://127.0.0.1:8080/'
+BASE = os.environ.get('YUZM_APP_URL', 'http://127.0.0.1:8080/').rstrip('/') + '/'
 checks = []
 DOCUMENT_FIELDS = {
     'YuzmPaymentTerms': '40% при заказе, 60% перед отгрузкой — согласовано с клиентом',
@@ -92,7 +93,7 @@ MOCK = r"""
           if (params.filter.iblockId !== 7) {error='WRONG_CATALOG'; break;}
           data={products:m.products.filter(product=>!params.filter['%name'] || product.name.toLowerCase().includes(params.filter['%name'].toLowerCase()))}; break;
         case 'catalog.product.get': {
-          if (m.conflictOnNextProductCheck) {m.dealRows[0].QUANTITY=999; m.conflictOnNextProductCheck=false;}
+          if (m.conflictOnNextProductCheck) {m.dealRows[0].QUANTITY=m.dealRows[0].QUANTITY===999 ? 1000 : 999; m.conflictOnNextProductCheck=false;}
           const product=m.products.find(product=>product.id===Number(params.id));
           if (product) data={product}; else error='NOT_FOUND'; break;
         }
@@ -119,10 +120,12 @@ MOCK = r"""
         }
         case 'crm.item.productrow.set':
           if (params.ownerType!=='D' || params.ownerId!==1048) {error='WRONG_DEAL'; break;}
+          if (m.failNextWrite) {m.failNextWrite=false; error='ACCESS_DENIED'; break;}
           m.setCount++;
           m.dealRows=params.productRows.map((row,index)=>({ID:String(100+index),PRODUCT_ID:row.productId,
             PRODUCT_NAME:row.productName,PRICE:row.price,QUANTITY:row.quantity,SORT:row.sort,
             TAX_RATE:row.taxRate,TAX_INCLUDED:row.taxIncluded}));
+          if (m.corruptNextReadback) {m.corruptNextReadback=false; m.dealRows[0].QUANTITY+=1;}
           data=true; break;
         default: error='ERROR_METHOD_NOT_FOUND';
       }
@@ -192,6 +195,8 @@ with sync_playwright() as p:
     expect(page.locator('#docsBody .document-row')).to_have_count(0)
     assert not page.evaluate("window.__pilotMock.calls.some(call => call.method==='disk.file.get' && Number(call.params.id)===10)")
     passed('separate coating and metal JSON files load with authenticated Disk fetch and optional template default')
+    expect(page.locator('[data-field=coatingCode] option[value=zinc_paint]')).to_have_count(1)
+    passed('older Disk coating lists gain the combined zinc and RAL painting option')
 
     page.locator('.item-row [data-action=choose-product]').click()
     expect(page.locator('#productResults .catalog-result')).to_have_count(2)
@@ -293,6 +298,9 @@ with sync_playwright() as p:
     second.locator('[data-field=fasteners]').fill('25')
     second.locator('[data-field=executionTerm]').fill('до 30.11.2026')
     second.locator('[data-field=coatingCode]').select_option('paint')
+    second.locator('[data-field=ralColor]').fill('9005')
+    first.locator('[data-field=coatingCode]').select_option('zinc_paint')
+    first.locator('[data-field=ralColor]').fill('RAL 7035 матовый')
     assert money(page.locator('#grandTotal').inner_text()) == '13657,60'
     expect(page.locator('[data-field=extraCoating], [data-field=delivery]')).to_have_count(0)
     passed('two Excel lines use Disk price/kg × entered weight × K1 × K2 × K3 plus per-item fasteners')
@@ -317,6 +325,8 @@ with sync_playwright() as p:
     expect(page.locator('#quotePreview tbody tr')).to_have_count(2)
     expect(page.locator('#quotePreview tbody tr').nth(0)).to_contain_text('15 рабочих дней')
     expect(page.locator('#quotePreview tbody tr').nth(1)).to_contain_text('до 30.11.2026')
+    expect(page.locator('#quotePreview tbody tr').nth(0)).to_contain_text('Горячее цинкование + окрашивание RAL 7035 матовый')
+    expect(page.locator('#quotePreview tbody tr').nth(1)).to_contain_text('Окраска RAL 9005')
     assert money(page.locator('.quote-total').inner_text().replace('Итого:', '')) == '13657,60'
     assert page.evaluate('window.__pilotMock.uploads.length') == uploads_before_preview + 1
     assert doc_add_count(page) == 0
@@ -344,6 +354,25 @@ with sync_playwright() as p:
     page.locator('[data-view-version]').nth(0).click()
     assert money(page.locator('.quote-total').inner_text().replace('Итого:', '')) == '13657,60'
     expect(page.locator('#generateDocumentBtn')).to_be_enabled()
+    # Every failure must stop before document.add; a retry keeps this saved KP.
+    page.evaluate('window.__pilotMock.failNextWrite=true')
+    page.locator('#generateDocumentBtn').click()
+    expect(page.locator('#status')).to_contain_text('ACCESS_DENIED')
+    assert doc_add_count(page) == 0
+    assert page.evaluate('window.__pilotMock.setCount') == 2
+    passed('denied mandatory transfer blocks document creation')
+    page.evaluate('window.__pilotMock.conflictOnNextProductCheck=true')
+    page.locator('#generateDocumentBtn').click()
+    expect(page.locator('#status')).to_contain_text('изменились после предварительного просмотра')
+    assert doc_add_count(page) == 0
+    assert page.evaluate('window.__pilotMock.setCount') == 2
+    passed('concurrent CRM changes block document creation before replacement')
+    page.evaluate('window.__pilotMock.corruptNextReadback=true')
+    page.locator('#generateDocumentBtn').click()
+    expect(page.locator('#status')).to_contain_text('Запись выполнена, но состав или цены')
+    assert doc_add_count(page) == 0
+    assert page.evaluate('window.__pilotMock.setCount') == 3
+    passed('unverified mandatory transfer blocks document creation without automatic retry')
     page.locator('#generateDocumentBtn').click()
     expect(page.locator('#documentResult')).to_contain_text('Документ #500 создан')
     expect(page.locator('#documentResult a').filter(has_text='Скачать DOCX')).to_have_attribute('href', 'https://pilot.bitrix.example/documents/500.docx')
@@ -353,15 +382,18 @@ with sync_playwright() as p:
     request = page.evaluate("window.__pilotMock.calls.find(call=>call.method==='crm.documentgenerator.document.add').params")
     assert request['templateId'] == 7 and request['entityId'] == 1048 and request['entityTypeId'] == 2
     assert request['values']['KpItems'] == [
-        {'Name': 'НФГ-6,0-02', 'Coating': 'Горячее цинкование', 'Quantity': '3', 'Price': '2\u00a0109,20', 'Total': '6\u00a0327,60', 'ExecutionTerm': '15 рабочих дней'},
-        {'Name': 'ОГК-6', 'Coating': 'Окраска', 'Quantity': '2', 'Price': '3\u00a0665,00', 'Total': '7\u00a0330,00', 'ExecutionTerm': 'до 30.11.2026'},
+        {'Name': 'НФГ-6,0-02', 'Coating': 'Горячее цинкование + окрашивание RAL 7035 матовый', 'Quantity': '3', 'Price': '2\u00a0109,20', 'Total': '6\u00a0327,60', 'ExecutionTerm': '15 рабочих дней'},
+        {'Name': 'ОГК-6', 'Coating': 'Окраска RAL 9005', 'Quantity': '2', 'Price': '3\u00a0665,00', 'Total': '7\u00a0330,00', 'ExecutionTerm': 'до 30.11.2026'},
     ]
     assert money(request['fields']['TotalSum']['VALUE']) == '13657,60'
     for field, value in DOCUMENT_FIELDS.items():
         assert request['fields'][field]['VALUE'] == value
     assert page.evaluate('(index) => JSON.stringify(window.__pilotMock.uploads[index].snapshot)', snapshot_index) == snapshot_before
-    assert page.evaluate('window.__pilotMock.setCount') == 2
-    passed('document creation uses immutable snapshot prices, terms and template despite changed draft/deal data')
+    assert page.evaluate('window.__pilotMock.setCount') == 4
+    assert page.evaluate('window.__pilotMock.dealRows.map(row => [row.PRODUCT_ID, row.PRICE, row.QUANTITY])') == [[201, 2109.2, 3], [202, 3665, 2]]
+    methods = page.evaluate('window.__pilotMock.calls.map(call => call.method)')
+    assert max(i for i, method in enumerate(methods) if method=='crm.deal.productrows.get') < methods.index('crm.documentgenerator.document.add')
+    passed('mandatory verified transfer and document use the immutable saved prices, RAL, terms and template')
 
     page.locator('#refreshDocumentBtn').click()
     expect(page.locator('#documentResult')).to_contain_text('Документ #500 готов')

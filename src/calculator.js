@@ -73,10 +73,36 @@ export function validateConfig(raw) {
     const name = optionalText(entry.name, 'Название покрытия') || code;
     if (seen.has(code)) throw new Error(`Повторный код покрытия «${code}».`);
     seen.add(code);
-    return { code, name };
+    return { code, name, ...(coatingSupportsRal({...entry, code, name}) ? {supportsRal: true} : {}) };
   });
   // Metal prices are loaded separately; importing coating settings never changes them.
   return { version: version(raw.version), currency, coatings, formulaMode, rounding, calculationVersion: 2 };
+}
+
+/** Add the new standard option to editable drafts, including older Disk lists. */
+export function withCoatingOptions(config) {
+  if (config.coatings.some(coating => coating.code === 'zinc_paint'
+    || (/цинк/i.test(coating.name) && coatingSupportsRal(coating)))) return config;
+  return {...config, coatings: [...config.coatings, {
+    code: 'zinc_paint', name: 'Горячее цинкование + окрашивание RAL', supportsRal: true,
+  }]};
+}
+
+export function coatingSupportsRal(coating) {
+  return Boolean(coating && (coating.supportsRal === true
+    || ['paint', 'zinc_paint'].includes(coating.code) || /окраск|окраш|покраск/i.test(coating.name || '')));
+}
+
+/** RAL is descriptive text only and never participates in the price formula. */
+export function formatCoating(coating, ralColor = '') {
+  const name = coating?.name || coating?.code || '';
+  if (!coatingSupportsRal(coating)) return name;
+  if (typeof ralColor !== 'string' || ralColor.length > 100 || /[\u0000-\u001f\u007f]/.test(ralColor)) {
+    throw new Error('Номер RAL: введите текст длиной до 100 символов.');
+  }
+  const color = ralColor.trim().replace(/^RAL\s*/i, '').trim();
+  const label = name.replace(/\s+RAL\s*$/i, '');
+  return color ? `${label} RAL ${color}` : label;
 }
 
 /** Validate the separately loaded per-product metal price file. */
@@ -181,6 +207,9 @@ export function calculateQuote(rows, rawConfig) {
     const errors = [];
     if (row !== input) errors.push('Некорректная позиция.');
     if (!coatingCodes.has(String(row.coatingCode ?? ''))) errors.push('Выберите покрытие из справочника.');
+    let coatingName = '';
+    try { coatingName = formatCoating(config.coatings.find(coating => coating.code === row.coatingCode), row.ralColor); }
+    catch (error) { errors.push(error.message); }
     if (row.currency !== config.currency) errors.push(`Валюта товара должна быть ${config.currency}; автоматическая конвертация не выполняется.`);
     const commonFields = [
       ['quantity', 'Количество', false, true],
@@ -229,7 +258,7 @@ export function calculateQuote(rows, rawConfig) {
       }
     }
     quoteErrors.push(...errors.map(error => `Позиция ${index + 1}: ${error}`));
-    const calculatedRow = {...row, unitPrice, lineTotal, valid: errors.length === 0, errors};
+    const calculatedRow = {...row, coatingName, unitPrice, lineTotal, valid: errors.length === 0, errors};
     delete calculatedRow.coatingFactor;
     return calculatedRow;
   });

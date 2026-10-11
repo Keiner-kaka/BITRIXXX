@@ -1,10 +1,12 @@
+import os
 """Functional UI tests. Start HTTP server first; uses system Chromium."""
 from pathlib import Path
 import json
+import re
 from playwright.sync_api import sync_playwright, expect
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = 'http://127.0.0.1:8080/'
+BASE = os.environ.get('YUZM_APP_URL', 'http://127.0.0.1:8080/').rstrip('/') + '/'
 checks = []
 
 def text_money(value):
@@ -30,6 +32,30 @@ with sync_playwright() as p:
     expect(page.locator('#docsBody .document-row')).to_have_count(0)
     expect(page.locator('#relationsBody, #relationsSummary, #localRelationsInput, #relationsFileId, [data-field=drawingId], [data-file-id]')).to_have_count(0)
     passed('demo formula matches the supplied mockup and blocks real-deal writes')
+
+    expect(page.locator('#shipmentDate, [data-field=nonstandard]')).to_have_count(0)
+    expect(page.locator('#columnHeaders')).not_to_contain_text('Особые условия')
+    passed('unused shipment date and nonstandard marker are removed')
+
+    color_row = page.locator('.item-row').last
+    color_row.locator('[data-field=ralColor]').fill('9005 матовый')
+    expect(color_row.locator('[data-field=k3]')).to_have_value('1,12')
+    color_row.locator('[data-field=coatingCode]').select_option('zinc_paint')
+    expect(color_row.locator('[data-field=ralColor]')).to_have_value('9005 матовый')
+    color_row.locator('[data-field=coatingCode]').select_option('none')
+    expect(color_row.locator('[data-field=ralColor]')).to_have_count(0)
+    color_row.locator('[data-field=coatingCode]').select_option('paint')
+    page.reload(wait_until='networkidle')
+    expect(page.locator('.item-row').last.locator('[data-field=ralColor]')).to_have_value('9005 матовый')
+    assert text_money(page.locator('#grandTotal').inner_text()) == '1948708,34'
+    passed('RAL appears only for painting options, survives reload and never changes prices')
+
+    for preset, phrase in [('bolts', 'на базе болтов'), ('excluded', 'Крепеж в комплект не входит.'), ('studs', 'на базе шпилек')]:
+        page.locator('#fastenerTermsPreset').select_option(preset)
+        expect(page.locator('#YuzmFastenerTerms')).to_have_value(re.compile(phrase))
+    page.locator('#YuzmFastenerTerms').fill('Крепеж на базе шпилек включен по спецификации клиента')
+    expect(page.locator('#fastenerTermsPreset')).to_have_value('')
+    passed('all three fastener presets fill editable commercial text')
 
     row = page.locator('.item-row').first
     row.locator('[data-field=quantity]').fill('0')
@@ -85,6 +111,7 @@ with sync_playwright() as p:
     assert text_money(page.locator('.quote-total').inner_text().replace('Итого:', '')) == '1948708,34'
     expect(page.locator('#quotePreview')).to_contain_text('15 рабочих дней')
     expect(page.locator('#quotePreview')).to_contain_text('20 рабочих дней')
+    expect(page.locator('#quotePreview')).to_contain_text('Окраска RAL 9005 матовый')
     expect(page.locator('#quotePreview')).to_contain_text(payment_text)
     expect(page.locator('#quotePreview')).to_contain_text(delivery_text)
     assert 'Условия изменены после сохранения' not in page.locator('#quotePreview').inner_text()
@@ -287,7 +314,7 @@ with sync_playwright() as p:
     assert snapshot['documentFields']['YuzmPaymentTerms'] == payment_text
     assert snapshot['documentFields']['YuzmDeliveryTerms'] == delivery_text
     assert snapshot['rows'][0]['k3'] == '1.18' and snapshot['metalPrices']['prices_per_kg']['16'] == 120
-    assert all(set(coating) == {'code', 'name'} for coating in snapshot['config']['coatings'])
+    assert all({'code', 'name'} <= set(coating) <= {'code', 'name', 'supportsRal'} for coating in snapshot['config']['coatings'])
     assert not {'relations', 'relationMeta', 'documents'}.intersection(snapshot)
     assert all(not {'drawingId', 'coatingFactor', 'extraCoating', 'delivery'}.intersection(row) for row in snapshot['rows'])
     passed('download contains complete reproducible quote and reference snapshots')

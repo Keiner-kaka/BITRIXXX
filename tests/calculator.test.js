@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import { parseNumber, formatMoney, validateConfig, validateMetalPrices, calculateQuote } from '../src/calculator.js';
+import { parseNumber, formatMoney, validateConfig, validateMetalPrices, calculateQuote, withCoatingOptions, formatCoating } from '../src/calculator.js';
 
 const config = {
   version: 'pilot', currency: 'RUB', formulaMode: 'catalog', rounding: 'line',
@@ -10,6 +10,29 @@ const config = {
 const row = (overrides = {}) => ({ id: 'row-1', productId: '101', productName: 'Опора', basePrice: 38600, currency: 'RUB', quantity: 24, coatingCode: 'zinc', k1: '1,12', k2: '1,08', k3: '1,18', ...overrides });
 const excelConfig = {...config, formulaMode: 'excel'};
 const excelRow = (overrides = {}) => row({pricePerKg: 20, weight: 5, quantity: 2, k1: 2, k2: 1.5, k3: 1.2, fasteners: 10, ...overrides});
+
+test('RAL labels remain text, preserve color spelling and never change either price formula', () => {
+  const upgraded = withCoatingOptions(validateConfig(config));
+  assert.equal(withCoatingOptions(upgraded), upgraded);
+  for (const coatingCode of ['paint', 'zinc_paint']) {
+    const coating = upgraded.coatings.find(entry => entry.code === coatingCode);
+    assert.equal(coating.supportsRal, true);
+    assert.match(formatCoating(coating, '  RAL 09005 матовый  '), /RAL 09005 матовый$/);
+    assert.equal(formatCoating(coating, ''), coating.name.replace(/\s+RAL$/, ''));
+    for (const formulaMode of ['catalog', 'excel']) {
+      const base = excelRow({coatingCode, ralColor: ''});
+      const before = calculateQuote([base], {...upgraded, formulaMode});
+      const after = calculateQuote([{...base, ralColor: '9005'}], {...upgraded, formulaMode});
+      assert.equal(after.valid, true);
+      assert.equal(after.total, before.total);
+      assert.match(after.rows[0].coatingName, /RAL 9005$/);
+    }
+  }
+  assert.equal(formatCoating(upgraded.coatings[0], '9005'), 'Без покрытия');
+  for (const ralColor of [1234, {}, 'x'.repeat(101), '9005\n']) {
+    assert.equal(calculateQuote([row({coatingCode: 'paint', ralColor})], upgraded).valid, false);
+  }
+});
 
 test('Russian decimal input is finite and blank input is never zero', () => {
   assert.equal(parseNumber('38 600,25'), 38600.25);

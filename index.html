@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#4267e9">
-  <meta name="application-version" content="2.0.3">
+  <meta name="application-version" content="2.1.0">
   <title>ЮЗМ · Конструктор коммерческого предложения</title>
   <link rel="stylesheet" href="styles.css">
   <script src="src/sdk-loader.js"></script>
@@ -45,7 +45,6 @@
 
       <section class="customer-section" aria-label="Данные предложения">
         <div class="field company-field"><label for="companyName">Наименование компании</label><div class="input-with-icon"><svg class="icon"><use href="#icon-building"/></svg><input id="companyName" type="text" placeholder="Название компании" autocomplete="organization"></div></div>
-        <div class="field shipment-field"><label for="shipmentDate">Планируемая дата отгрузки</label><input id="shipmentDate" type="date"></div>
       </section>
 
       <section class="variant-section" aria-label="Варианты коммерческого предложения">
@@ -61,7 +60,7 @@
       <section class="items-section" aria-label="Состав коммерческого предложения">
         <div class="items-scroll">
           <div id="columnHeaders" class="column-headers" aria-hidden="true">
-            <span>Наименование и базовая цена</span><span>Покрытие</span><span>Кол-во</span><span>Коэффициенты</span><span>Срок исполнения</span><span>Особые условия</span><span></span>
+            <span>Наименование и базовая цена</span><span>Покрытие</span><span>Кол-во</span><span>Коэффициенты</span><span>Срок исполнения</span><span></span>
           </div>
           <div id="itemsBody" class="items-body"></div>
         </div>
@@ -88,7 +87,7 @@
             <label for="YuzmPaymentTerms">Условия оплаты</label>
             <textarea id="YuzmPaymentTerms" rows="3" placeholder="Укажите условия оплаты"></textarea>
           </div>
-          <div class="field"><div class="term-label-row"><label for="YuzmFastenerTerms">Условия по метизам</label><button class="button quiet term-preset" type="button" data-term-preset="YuzmFastenerTerms" aria-label="Подставить образец условий по метизам">По образцу</button></div><textarea id="YuzmFastenerTerms" rows="3" placeholder="Укажите условия по метизам"></textarea></div>
+          <div class="field"><label for="fastenerTermsPreset">Условия по метизам</label><select id="fastenerTermsPreset"><option value="">Свой текст</option><option value="bolts">Крепеж на базе болтов включен</option><option value="excluded">Крепеж в комплект не входит</option><option value="studs">Крепеж на базе шпилек включен</option></select><label for="YuzmFastenerTerms">Текст для КП</label><textarea id="YuzmFastenerTerms" rows="3" placeholder="Укажите условия по метизам"></textarea></div>
           <div class="field"><div class="term-label-row"><label for="YuzmDocumentsTerms">Документы к поставке</label><button class="button quiet term-preset" type="button" data-term-preset="YuzmDocumentsTerms" aria-label="Подставить образец условий по документам к поставке">По образцу</button></div><textarea id="YuzmDocumentsTerms" rows="3" placeholder="Укажите документы к поставке"></textarea></div>
           <div class="field"><div class="term-label-row"><label for="YuzmDeliveryTerms">Условия доставки</label><button class="button quiet term-preset" type="button" data-term-preset="YuzmDeliveryTerms" aria-label="Подставить образец условий доставки">По образцу</button></div><textarea id="YuzmDeliveryTerms" rows="3" placeholder="Укажите адрес и условия доставки"></textarea></div>
           <div class="field wide"><div class="term-label-row"><label for="YuzmValidityTerms">Срок действия КП</label><button class="button quiet term-preset" type="button" data-term-preset="YuzmValidityTerms" aria-label="Подставить образец срока действия КП">По образцу</button></div><textarea id="YuzmValidityTerms" rows="2" placeholder="Укажите срок действия предложения"></textarea></div>

@@ -1,5 +1,5 @@
 {
-  "version": "pilot-ui-2",
+  "version": "pilot-ui-2.1",
   "calculationVersion": 2,
   "currency": "RUB",
   "formulaMode": "catalog",
@@ -7,7 +7,8 @@
   "coatings": [
     {"code": "none", "name": "Без покрытия"},
     {"code": "zinc", "name": "Горячее цинкование"},
-    {"code": "paint", "name": "Окраска"},
+    {"code": "paint", "name": "Окраска", "supportsRal": true},
+    {"code": "zinc_paint", "name": "Горячее цинкование + окрашивание RAL", "supportsRal": true},
     {"code": "bitumen", "name": "Битумный лак"}
   ]
 }

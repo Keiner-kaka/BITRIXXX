@@ -1,5 +1,5 @@
 /* Bitrix24 application transport. No webhook URLs or application secrets are stored here. */
-import { parseNumber } from './calculator.js';
+import { parseNumber, formatCoating } from './calculator.js';
 
 const ALLOWED_METHODS = new Set([
   'app.info',
@@ -542,7 +542,7 @@ export class BitrixAdapter {
       const coating = snapshot.config?.coatings?.find(entry => entry.code === row.coatingCode);
       return {
         Name: documentText(row.productName, `Наименование позиции ${index + 1}`, true),
-        Coating: documentText(row.coatingName ?? coating?.name ?? row.coatingCode ?? '', 'Покрытие'),
+        Coating: documentText(formatCoating(coating || {code: row.coatingCode, name: row.coatingName || row.coatingCode || ''}, row.ralColor), 'Покрытие'),
         Quantity: String(quantity).replace('.', ','),
         Price: DOCUMENT_MONEY.format(price),
         Total: DOCUMENT_MONEY.format(lineTotal),
@@ -569,15 +569,25 @@ export class BitrixAdapter {
     const response = await this.call('crm.documentgenerator.template.get', { id: Number(templateId) });
     const template = documentTemplate(response?.template, deal.categoryId);
     if (template.id !== templateId || !template.available) throw new Error('Выбранный шаблон удалён, неактивен или недоступен для направления этой сделки.');
-    const created = await this.call('crm.documentgenerator.document.add', {
-      templateId: Number(templateId), entityTypeId: 2, entityId: Number(dealId),
-      values: { KpItems: items }, fields,
-    });
+    // Validate the complete document and template before changing CRM. The
+    // document and the mandatory replacement use the very same saved version.
+    const before = await this.loadDeal(dealId);
+    await this.applyToDeal(dealId, snapshot, fingerprintRows(before.rows));
+    let created;
+    try {
+      created = await this.call('crm.documentgenerator.document.add', {
+        templateId: Number(templateId), entityTypeId: 2, entityId: Number(dealId),
+        values: { KpItems: items }, fields,
+      });
+    } catch (error) {
+      error.goodsTransferred = true;
+      throw error;
+    }
     try {
       return this._document(created?.document, { templateId, entityId: dealId, entityTypeId: '2' });
     } catch (error) {
       let documentId;
-      try { documentId = id(created?.document?.id, 'ID документа'); } catch { throw error; }
+      try { documentId = id(created?.document?.id, 'ID документа'); } catch { error.goodsTransferred = true; throw error; }
       const unverified = new Error(`Bitrix24 вернул документ #${documentId}, но его данные или ссылки не подтверждены. Проверьте документ перед повторным созданием.`);
       unverified.code = 'DOCUMENT_RESPONSE_UNVERIFIED';
       unverified.documentId = documentId;
@@ -688,7 +698,8 @@ export class BitrixAdapter {
     const requested = snapshot.rows.map((row, index) => {
       const productId = id(row.productId, 'ID товара');
       const price = number(row.unitPrice, 'Цена единицы');
-      const quantity = number(row.quantity, 'Количество');
+      const quantity = parseNumber(row.quantity);
+      if (!Number.isFinite(quantity)) throw new Error('Количество: требуется конечное число.');
       const taxRate = number(row.taxRate ?? row.raw?.TAX_RATE ?? 0, 'Ставка НДС');
       const taxIncluded = String(row.taxIncluded ?? row.raw?.TAX_INCLUDED ?? 'Y');
       if (taxRate < 0 || taxRate > 100 || !['Y', 'N'].includes(taxIncluded)) throw new Error('Некорректная ставка НДС или признак включения налога в цену.');
