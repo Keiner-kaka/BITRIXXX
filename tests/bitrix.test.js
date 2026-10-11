@@ -693,3 +693,36 @@ test('document responses reject unsafe links and different IDs without revealing
     id: '61', title: '', downloadUrl: 'https://portal.example/file', pdfUrl: '', publicUrl: '', conversionError: true,
   });
 });
+
+
+test('shared quote template is read from portal application settings, with strict ID validation', async () => {
+  let value = '7';
+  const {api, sdk} = await adapter({'app.option.get': () => ({data: value})});
+  assert.equal(await api.getQuoteTemplateId(), '7');
+  assert.deepEqual(sdk.calls.at(-1), {method:'app.option.get', params:{option:'yuzmQuoteTemplateId'}});
+  for (const empty of [null, '']) {
+    value = empty;
+    assert.equal(await api.getQuoteTemplateId(), '');
+  }
+  for (const invalid of [true, [], {}, '0', 'abc', -1]) {
+    value = invalid;
+    await assert.rejects(api.getQuoteTemplateId());
+  }
+});
+
+test('only an app administrator can save a shared quote template and read-back must confirm it', async () => {
+  let value = '7', confirm = true;
+  const {api, sdk} = await adapter({
+    'app.option.set': params => { if (confirm) value = params.options.yuzmQuoteTemplateId; return {data:true}; },
+    'app.option.get': () => ({data:value}),
+  });
+  await assert.rejects(api.setQuoteTemplateId('8'), /администратор/);
+  assert.equal(sdk.calls.length, 0);
+  sdk.isAdmin = () => true;
+  await assert.rejects(api.setQuoteTemplateId('invalid'));
+  assert.equal(sdk.calls.length, 0);
+  assert.equal(await api.setQuoteTemplateId('8'), '8');
+  assert.deepEqual(sdk.calls[0], {method:'app.option.set', params:{options:{yuzmQuoteTemplateId:'8'}}});
+  confirm = false;
+  await assert.rejects(api.setQuoteTemplateId('7'), /изменился при сохранении/);
+});

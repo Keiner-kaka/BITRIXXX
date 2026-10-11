@@ -2,7 +2,7 @@
 import { parseNumber, formatCoating } from './calculator.js';
 
 const ALLOWED_METHODS = new Set([
-  'app.info', 'user.get',
+  'app.info', 'app.option.get', 'app.option.set', 'user.get',
   'crm.deal.get', 'crm.deal.productrows.get', 'crm.deal.productrows.set',
   'crm.item.productrow.set', 'crm.company.get', 'crm.contact.get',
   'crm.catalog.list', 'crm.product.list', 'crm.product.get',
@@ -16,6 +16,7 @@ const ALLOWED_METHODS = new Set([
   'placement.bind', 'placement.get',
 ]);
 const MAX_JSON_BYTES = 5 * 1024 * 1024;
+const QUOTE_TEMPLATE_OPTION = 'yuzmQuoteTemplateId';
 const DOCUMENT_FIELDS = [
   'YuzmPaymentTerms', 'YuzmFastenerTerms', 'YuzmDocumentsTerms', 'YuzmDeliveryTerms',
   'YuzmValidityTerms', 'YuzmManagerPosition', 'YuzmManagerName', 'YuzmManagerPhone',
@@ -243,6 +244,28 @@ export class BitrixAdapter {
         });
       } catch { finish(new Error(`Bitrix24: ${method} — ошибка транспорта SDK.`)); }
     });
+  }
+
+  canManageSettings() {
+    try { return this.connected && this.sdk?.isAdmin?.() === true; }
+    catch { return false; }
+  }
+
+  async getQuoteTemplateId() {
+    const value = await this.call('app.option.get', {option: QUOTE_TEMPLATE_OPTION});
+    if (value === null || value === '') return '';
+    if (!['string', 'number'].includes(typeof value)) throw new Error('Битрикс24 вернул некорректный общий шаблон КП.');
+    return id(value, 'ID общего шаблона КП');
+  }
+
+  async setQuoteTemplateId(value) {
+    const templateId = id(value, 'ID общего шаблона КП');
+    if (!this.canManageSettings()) throw new Error('Общий шаблон КП может изменить администратор приложения.');
+    const saved = await this.call('app.option.set', {options: {[QUOTE_TEMPLATE_OPTION]: templateId}});
+    if (saved !== true) throw new Error('Битрикс24 не подтвердил сохранение общего шаблона КП.');
+    const actual = await this.getQuoteTemplateId();
+    if (actual !== templateId) throw new Error('Общий шаблон КП изменился при сохранении. Обновите настройки и повторите выбор.');
+    return actual;
   }
 
   /** SDK Result.more()/next() preserve next offsets for every supported list method. */

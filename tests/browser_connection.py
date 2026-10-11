@@ -75,6 +75,9 @@ with sync_playwright() as p:
 
         def api(route):
             requests.append(route.request.url.split('?')[0])
+            if '/rest/app.option.get' in route.request.url:
+                route.fulfill(status=200, content_type='application/json', body=json.dumps({'result':None}))
+                return
             assert '/rest/app.info' in route.request.url, route.request.url
             route.fulfill(status=200, content_type='application/json', body=json.dumps(
                 api_result if api_result is not None else {'result': {'ID': '99', 'INSTALLED': True}}))

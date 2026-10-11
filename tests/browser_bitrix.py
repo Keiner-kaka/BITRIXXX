@@ -5,6 +5,7 @@ Run a server on localhost:8080 first, then python tests/browser_bitrix.py.
 Requires Playwright and system Chromium, as in browser_smoke.py.
 """
 import re
+import json
 from playwright.sync_api import sync_playwright, expect
 
 BASE = os.environ.get('YUZM_APP_URL', 'http://127.0.0.1:8080/').rstrip('/') + '/'
@@ -25,7 +26,7 @@ MOCK = r"""
   const persisted = sessionStorage.getItem('__pilot_mock_server');
   const m = window.__pilotMock = persisted ? JSON.parse(persisted) : {
     calls: [], setCount: 0, uploads: [], nextFileId: 1000, documents: {}, nextDocumentId: 500,
-    responsibleId: 27, creatorId: 99,
+    responsibleId: 27, creatorId: 99, templateId: '7',
     users: {
       '27': {ID:'27',NAME:'Анна',LAST_NAME:'Соколова',WORK_POSITION:'Менеджер по продажам',WORK_PHONE:'+7 495 111-22-33',PERSONAL_MOBILE:'+7 900 000-00-00'},
       '28': {ID:'28',NAME:'Павел',LAST_NAME:'Иванов',WORK_POSITION:'Ведущий менеджер',WORK_PHONE:'+7 495 444-55-66'},
@@ -64,12 +65,23 @@ MOCK = r"""
   window.BX24 = {
     init(callback) { queueMicrotask(callback); },
     getDomain() { return 'pilot.bitrix.example'; },
+    isAdmin() { return m.admin !== false; },
     placement: {info() {return {placement:'CRM_DEAL_DETAIL_TAB',options:{ID:'1048'}};}},
     callMethod(method, params, callback) {
       m.calls.push({method,params:structuredClone(params)});
+      if (window.__portalOptionsServer && ['app.option.get','app.option.set'].includes(method)) {
+        fetch('app-options-mock', {method:'POST', body:JSON.stringify({method,params,admin:m.admin !== false})})
+          .then(response => response.json()).then(outcome => callback({error:()=>outcome.error ? {ex:{error:outcome.error}} : false, data:()=>outcome.data}));
+        return;
+      }
       let data, error;
       switch (method) {
         case 'app.info': data={ID:'99',INSTALLED:true}; break;
+        case 'app.option.get': if (m.optionsError) error=m.optionsError; else data=m.templateId ?? null; break;
+        case 'app.option.set':
+          if (m.failOptionWrite || m.admin === false) error='ACCESS_DENIED';
+          else {m.templateId=params.options.yuzmQuoteTemplateId; data=true;}
+          break;
         case 'crm.deal.get': data={ID:String(params.id),TITLE:'Пилот КП',COMPANY_ID:1,CURRENCY_ID:'RUB',CATEGORY_ID:0,ASSIGNED_BY_ID:Number(params.id)===1049 ? 28 : m.responsibleId,CREATED_BY_ID:m.creatorId}; break;
         case 'user.get': {
           if (m.profileError) {error=m.profileError; break;}
@@ -84,7 +96,7 @@ MOCK = r"""
           if (!template) error='NOT_FOUND'; else data={template:structuredClone(template)}; break;
         }
         case 'crm.documentgenerator.document.add': {
-          if (params.entityId!==1048 || params.entityTypeId!==2 || params.templateId!==7) {error='WRONG_DOCUMENT_TARGET'; break;}
+          if (params.entityId!==1048 || params.entityTypeId!==2 || params.templateId!==Number(m.templateId)) {error='WRONG_DOCUMENT_TARGET'; break;}
           const documentId=String(m.nextDocumentId++);
           const document={id:documentId,title:'КП ЮЗМ #'+documentId,templateId:params.templateId,
             entityId:params.entityId,entityTypeId:params.entityTypeId,
@@ -168,6 +180,95 @@ def doc_add_count(page):
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True, executable_path='/usr/bin/chromium', args=['--no-sandbox'])
+    # One portal setting shared by independent manager browsers.
+    portal_options = {'id':'7', 'deny_write':False, 'deny_read':False, 'writes':0}
+    def shared_context(admin):
+        ctx = browser.new_context(viewport={'width':1440,'height':1100}, locale='ru-RU')
+        ctx.add_init_script(MOCK + '\nwindow.__portalOptionsServer=true; window.__pilotMock.admin=' + json.dumps(admin) + ';')
+        ctx.route('https://api.bitrix24.tech/**', lambda route: route.fulfill(status=200, content_type='application/javascript', body='/* SDK mock */'))
+        def options_route(route):
+            request = json.loads(route.request.post_data)
+            if request['method'] == 'app.option.get':
+                outcome = {'error':'ACCESS_DENIED'} if portal_options['deny_read'] else {'data':portal_options['id']}
+            elif not request['admin'] or portal_options['deny_write']:
+                outcome = {'error':'ACCESS_DENIED'}
+            else:
+                portal_options['id'] = request['params']['options']['yuzmQuoteTemplateId']
+                portal_options['writes'] += 1
+                outcome = {'data':True}
+            route.fulfill(status=200, content_type='application/json', body=json.dumps(outcome))
+        ctx.route(BASE + 'app-options-mock', options_route)
+        pg = ctx.new_page()
+        pg.goto(BASE, wait_until='networkidle')
+        expect(pg.locator('#dealBadge')).to_contain_text('1048')
+        return ctx, pg
+
+    admin_ctx, admin_page = shared_context(True)
+    expect(admin_page.locator('#templateSummary')).to_contain_text('#7')
+    admin_page.locator('#settingsBtn').click()
+    admin_page.locator('#defaultDocumentTemplateId').select_option('8')
+    admin_page.locator('#closeSettingsBtn').click()
+    expect(admin_page.locator('#templateSummary')).to_contain_text('#7')
+    assert portal_options['writes'] == 0
+    admin_page.locator('#settingsBtn').click()
+    expect(admin_page.locator('#defaultDocumentTemplateId')).to_have_value('7')
+    admin_page.locator('#defaultDocumentTemplateId').select_option('8')
+    admin_page.locator('#settingsForm button[type=submit]').click()
+    expect(admin_page.locator('#settingsDialog')).not_to_be_visible()
+    assert portal_options['id'] == '8' and portal_options['writes'] == 1
+    expect(admin_page.locator('#createQuoteBtn')).to_be_enabled()
+    passed('admin saves one portal template; closing settings without saving keeps the previous choice')
+
+    manager_ctx, manager_page = shared_context(False)
+    expect(manager_page.locator('#templateSummary')).to_contain_text('#8')
+    manager_page.locator('#settingsBtn').click()
+    expect(manager_page.locator('#defaultDocumentTemplateId')).to_have_value('8')
+    expect(manager_page.locator('#defaultDocumentTemplateId')).to_be_disabled()
+    manager_page.locator('#closeSettingsBtn').click()
+    # Old browser-only defaults and draft overrides cannot replace the shared setting.
+    manager_page.evaluate("""() => {
+      const store='yuzm-kp-prototype-v1', scope=store+'-bitrix-pilot.bitrix.example-deal-1048';
+      const local=JSON.parse(localStorage.getItem(scope));
+      local.state.settings.defaultDocumentTemplateId='9';
+      local.state.variants.forEach(variant=>variant.draft.documentTemplateId='9');
+      localStorage.setItem(scope,JSON.stringify(local));
+      localStorage.setItem(store+'-settings',JSON.stringify({...local.state.settings,defaultDocumentTemplateId:'9'}));
+    }""")
+    manager_page.reload(wait_until='networkidle')
+    expect(manager_page.locator('#templateSummary')).to_contain_text('#8')
+    passed('a second manager browser reads the same template and ignores legacy local overrides')
+
+    admin_page.locator('#settingsBtn').click()
+    admin_page.locator('#defaultDocumentTemplateId').select_option('7')
+    portal_options['deny_write'] = True
+    admin_page.locator('#settingsForm button[type=submit]').click()
+    expect(admin_page.locator('#settingsError')).to_contain_text('ACCESS_DENIED')
+    expect(admin_page.locator('#settingsDialog')).to_be_visible()
+    expect(admin_page.locator('#templateSummary')).to_contain_text('#8')
+    assert portal_options['id'] == '8' and portal_options['writes'] == 1
+    passed('failed portal saving does not claim success or replace the common template locally')
+    portal_options['deny_write'] = False
+    admin_page.locator('#closeSettingsBtn').click()
+    manager_page.locator('#createQuoteBtn').click()
+    expect(manager_page.locator('#quoteDialog')).to_be_visible()
+    portal_options['deny_read'] = True
+    manager_page.locator('#generateDocumentBtn').click()
+    expect(manager_page.locator('#status')).to_contain_text('app.option.get')
+    expect(manager_page.locator('#status')).to_contain_text('ACCESS_DENIED')
+    assert manager_page.evaluate('window.__pilotMock.setCount') == 0
+    assert doc_add_count(manager_page) == 0
+    expect(manager_page.locator('#generateDocumentBtn')).to_be_disabled()
+    passed('fresh portal-option read failure blocks CRM and document writes instead of using a stale browser template')
+    portal_options['deny_read'] = False
+    manager_page.locator('#closeQuoteBtn').click()
+    manager_page.locator('#settingsBtn').click()
+    manager_page.locator('#refreshTemplatesBtn').click()
+    expect(manager_page.locator('#defaultDocumentTemplateId')).to_have_value('8')
+    expect(manager_page.locator('#defaultDocumentTemplateId')).to_be_disabled()
+    manager_page.locator('#closeSettingsBtn').click()
+    admin_ctx.close()
+    manager_ctx.close()
+
     context = browser.new_context(viewport={'width': 1440, 'height': 1100}, locale='ru-RU')
     context.add_init_script(MOCK)
     context.route('https://api.bitrix24.tech/**', lambda route: route.fulfill(status=200, content_type='application/javascript', body='/* mock SDK already injected */'))
@@ -184,9 +285,9 @@ with sync_playwright() as p:
     expect(page.locator('.item-row')).to_have_count(1)
     assert money(page.locator('#grandTotal').inner_text()) == '200,00'
     assert page.evaluate('window.__pilotMock.setCount') == 0
-    expect(page.locator('#documentTemplateId option[value="7"]')).to_have_text('КП ЮЗМ — действующий шаблон · #7')
-    expect(page.locator('#documentTemplateId option[value="8"]')).to_have_count(1)
-    expect(page.locator('#documentTemplateId option[value="9"]')).to_have_count(0)
+    expect(page.locator('#defaultDocumentTemplateId option[value="7"]')).to_have_text('КП ЮЗМ — действующий шаблон · #7')
+    expect(page.locator('#defaultDocumentTemplateId option[value="8"]')).to_have_count(1)
+    expect(page.locator('#defaultDocumentTemplateId option[value="9"]')).to_have_count(0)
     assert doc_add_count(page) == 0
     passed('placement opens negotiated prices and registered templates without CRM/document writes')
     expect(page.locator('#YuzmManagerName')).to_have_value('Анна Соколова')
@@ -201,7 +302,7 @@ with sync_playwright() as p:
     page.locator('#pricesFileId').fill('11')
     page.locator('#metalPricesFileId').fill('12')
     page.locator('#historyFolderId').fill('42')
-    page.locator('#defaultDocumentTemplateId').fill('8')
+    page.locator('#defaultDocumentTemplateId').select_option('8')
     page.locator('#roundingMode').select_option('unit')
     page.locator('#loadRemoteBtn').click()
     expect(page.locator('#settingsError')).to_contain_text('загружены и проверены')
@@ -209,12 +310,14 @@ with sync_playwright() as p:
     expect(page.locator('#settingsError')).to_contain_text('Цены металла загружены с Диска')
     expect(page.locator('#metalPricesSummary')).to_contain_text('2 цен')
     expect(page.locator('#metalPricesSummary')).to_contain_text('файл #12')
-    page.locator('#closeSettingsBtn').click()
-    expect(page.locator('#documentTemplateId')).to_have_value('8')
+    page.locator('#defaultDocumentTemplateId').select_option('8')
+    page.locator('#settingsForm button[type=submit]').click()
+    expect(page.locator('#settingsDialog')).not_to_be_visible()
+    expect(page.locator('#templateSummary')).to_contain_text('#8')
     expect(page.locator('#relationsBody, #relationsSummary, #localRelationsInput, #relationsFileId, [data-field=drawingId], [data-file-id]')).to_have_count(0)
     expect(page.locator('#docsBody .document-row')).to_have_count(0)
     assert not page.evaluate("window.__pilotMock.calls.some(call => call.method==='disk.file.get' && Number(call.params.id)===10)")
-    passed('separate coating and metal JSON files load with authenticated Disk fetch and optional template default')
+    passed('separate JSON sources load and the registered common template saves to portal settings')
     expect(page.locator('[data-field=coatingCode] option[value=zinc_paint]')).to_have_count(1)
     passed('older Disk coating lists gain the combined zinc and RAL painting option')
 
@@ -338,7 +441,10 @@ with sync_playwright() as p:
     page.locator('#variantSelect').select_option(saved_variant)
     expect(page.locator('#YuzmPaymentTerms')).to_have_value(DOCUMENT_FIELDS['YuzmPaymentTerms'])
     passed('editable payment presets and commercial conditions remain independent between variants')
-    page.locator('#documentTemplateId').select_option('7')
+    page.locator('#settingsBtn').click()
+    page.locator('#defaultDocumentTemplateId').select_option('7')
+    page.locator('#settingsForm button[type=submit]').click()
+    expect(page.locator('#settingsDialog')).not_to_be_visible()
     uploads_before_preview = page.evaluate('window.__pilotMock.uploads.length')
     page.locator('#createQuoteBtn').click()
     expect(page.locator('#quoteDialog')).to_be_visible()
@@ -369,7 +475,9 @@ with sync_playwright() as p:
     expect(page.locator('#settingsError')).to_contain_text('Цены металла загружены с Диска')
     page.locator('#closeSettingsBtn').click()
     expect(page.locator('.item-row').nth(0).locator('[data-field=pricePerKg]')).to_have_value('999')
-    page.locator('#documentTemplateId').select_option('8')
+    # Another administrator changes the portal template while this manager's tab remains open.
+    page.evaluate("window.__pilotMock.templateId='8'")
+    expect(page.locator('#templateSummary')).to_contain_text('#7')
     page.locator('#historyBtn').click()
     page.locator('[data-view-version]').nth(0).click()
     assert money(page.locator('.quote-total').inner_text().replace('Итого:', '')) == '13657,60'
@@ -400,7 +508,7 @@ with sync_playwright() as p:
     expect(page.locator('#generateDocumentBtn')).to_be_disabled()
     assert doc_add_count(page) == 1
     request = page.evaluate("window.__pilotMock.calls.find(call=>call.method==='crm.documentgenerator.document.add').params")
-    assert request['templateId'] == 7 and request['entityId'] == 1048 and request['entityTypeId'] == 2
+    assert request['templateId'] == 8 and request['entityId'] == 1048 and request['entityTypeId'] == 2
     assert request['values']['KpItems'] == [
         {'Name': 'НФГ-6,0-02', 'Coating': 'Горячее цинкование + окрашивание RAL 7035 матовый', 'Quantity': '3', 'Price': '2\u00a0109,20', 'Total': '6\u00a0327,60', 'ExecutionTerm': '15 рабочих дней'},
         {'Name': 'ОГК-6', 'Coating': 'Окраска RAL 9005', 'Quantity': '2', 'Price': '3\u00a0665,00', 'Total': '7\u00a0330,00', 'ExecutionTerm': 'до 30.11.2026'},
@@ -413,7 +521,8 @@ with sync_playwright() as p:
     assert page.evaluate('window.__pilotMock.dealRows.map(row => [row.PRODUCT_ID, row.PRICE, row.QUANTITY])') == [[201, 2109.2, 3], [202, 3665, 2]]
     methods = page.evaluate('window.__pilotMock.calls.map(call => call.method)')
     assert max(i for i, method in enumerate(methods) if method=='crm.deal.productrows.get') < methods.index('crm.documentgenerator.document.add')
-    passed('mandatory verified transfer and document use the immutable saved prices, RAL, terms and template')
+    expect(page.locator('#templateSummary')).to_contain_text('#8')
+    passed('generation re-reads the current common template while preserving all saved prices, RAL, terms and signature')
 
     page.locator('#refreshDocumentBtn').click()
     expect(page.locator('#documentResult')).to_contain_text('Документ #500 готов')
@@ -434,6 +543,24 @@ with sync_playwright() as p:
     assert doc_add_count(page) == 1
     assert page.evaluate('(index) => JSON.stringify(window.__pilotMock.uploads[index].snapshot)', snapshot_index) == snapshot_before
     passed('PDF polling reuses the same document and generated links survive reload without changing snapshots')
+
+    page.locator('#closeQuoteBtn').click()
+    page.locator('#settingsBtn').click()
+    page.locator('#defaultDocumentTemplateId').select_option('7')
+    page.locator('#settingsForm button[type=submit]').click()
+    expect(page.locator('#settingsDialog')).not_to_be_visible()
+    page.locator('#historyBtn').click()
+    page.locator('[data-view-version]').nth(0).click()
+    expect(page.locator('#generateDocumentBtn')).to_be_enabled()
+    page.locator('#generateDocumentBtn').click()
+    expect(page.locator('#documentResult')).to_contain_text('Документ #501 создан')
+    assert doc_add_count(page) == 2
+    assert page.evaluate("window.__pilotMock.documents['500'].templateId") == 8
+    assert page.evaluate("window.__pilotMock.documents['501'].templateId") == 7
+    assert page.evaluate("window.__pilotMock.documents['500'].pdfUrl") == 'https://pilot.bitrix.example/documents/500.pdf'
+    assert page.evaluate('(index) => JSON.stringify(window.__pilotMock.uploads[index].snapshot)', snapshot_index) == snapshot_before
+    expect(page.locator('#docsBody a').filter(has_text='Скачать DOCX')).to_have_count(2)
+    passed('a changed common template can generate a new document from the same version while keeping previous documents and snapshots')
 
     assert not page.evaluate(r'window.__pilotMock.calls.some(call=>/^catalog\..*(update|delete|add)$/.test(call.method))')
     assert not errors, errors

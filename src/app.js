@@ -12,6 +12,7 @@ let config, calculation, state, metalPrices = null, connected = false, busy = fa
 let connecting = false, connectionCode = 'NOT_STARTED';
 let catalogProducts = clone(demoProducts), priceMeta = {source: 'demo'}, metalPriceMeta = {source: 'demo'};
 let templates = [], templatesLoaded = false;
+let sharedTemplate = {id: '', loaded: false, loading: false, error: ''};
 let managerProfile = null, managerLoading = false, managerRequest = 0, managerMessage = '';
 let previewFingerprint = null;
 const documentFieldNames = ['YuzmPaymentTerms', 'YuzmFastenerTerms', 'YuzmDocumentsTerms', 'YuzmDeliveryTerms', 'YuzmValidityTerms', 'YuzmManagerPosition', 'YuzmManagerName', 'YuzmManagerPhone'];
@@ -34,7 +35,7 @@ const defaultDocumentFields = {
   YuzmValidityTerms: 'КП действительно в течение трех рабочих дней.',
   YuzmManagerPosition: '', YuzmManagerName: '', YuzmManagerPhone: ''
 };
-const defaultSettings = {dealId: '', pricesFileId: '', metalPricesFileId: '', historyFolderId: '', defaultDocumentTemplateId: '', formulaMode: 'catalog', rounding: 'line'};
+const defaultSettings = {dealId: '', pricesFileId: '', metalPricesFileId: '', historyFolderId: '', formulaMode: 'catalog', rounding: 'line'};
 const draft = () => currentVariant().draft;
 const currentVariant = () => state.variants.find(v => v.id === state.selectedVariantId);
 
@@ -72,7 +73,7 @@ function settingsMessage(message) {
 function openDialog(id) { $(id).showModal(); }
 function closeDialog(id) { $(id).close(); }
 function blankDraft(rows = []) {
-  return {companyName: 'ООО «КраснодарЭлектро»', rows, currency: 'RUB', documentTemplateId: state?.settings?.defaultDocumentTemplateId || '', documentFields: clone(defaultDocumentFields), managerOverrides: {}};
+  return {companyName: 'ООО «КраснодарЭлектро»', rows, currency: 'RUB', documentFields: clone(defaultDocumentFields), managerOverrides: {}};
 }
 function makeVariant(name, draftValue) { return {id: uid(), name, draft: draftValue, versions: [], documents: []}; }
 function freshState() {
@@ -98,6 +99,7 @@ function readStored(scope) {
       if (!variant.id || typeof variant.name !== 'string' || !Array.isArray(variant.draft?.rows) || !Array.isArray(variant.versions)) return null;
       variant.draft.rows = migrateRows(variant.draft.rows, variant.context?.config || value.config, variant.context?.metalPrices || value.metalPrices);
       delete variant.draft.shipmentDate;
+      delete variant.draft.documentTemplateId;
       if (variant.context?.metalPrices) validateMetalPrices(variant.context.metalPrices);
       variant.draft.documentFields = {...clone(defaultDocumentFields), ...value.state.settings?.documentFields, ...variant.draft.documentFields};
       ensureManagerOverrides(variant.draft);
@@ -113,6 +115,7 @@ function restore(value) {
   state.settings = {...clone(defaultSettings), ...state.settings};
   delete state.settings.relationsFileId;
   delete state.settings.documentFields;
+  delete state.settings.defaultDocumentTemplateId;
   priceMeta = value.priceMeta || {};
   metalPrices = value.metalPrices ? validateMetalPrices(value.metalPrices) : null;
   metalPriceMeta = value.metalPriceMeta || {source: 'unconfigured'};
@@ -327,21 +330,37 @@ function renderDocuments() {
   if (!currentVariant().versions.length) $('docsBody').append(element('p', {class: 'empty-state', text: 'Сохраните версию КП, чтобы открыть её здесь.'}));
 }
 function selectedTemplateId() {
-  return draft().documentTemplateId || state.settings.defaultDocumentTemplateId || '';
+  return sharedTemplate.loaded ? sharedTemplate.id : '';
 }
 function renderTemplates() {
-  const selected = selectedTemplateId();
+  const selected = $('settingsDialog').open ? $('defaultDocumentTemplateId').value : selectedTemplateId();
   const options = [option('', connected ? 'Выберите зарегистрированный шаблон' : 'Подключите сделку Битрикс24')];
-  if (selected && !templates.some(t => String(t.id) === selected)) options.push(option(selected, 'Шаблон #' + selected + ' · обновите список'));
+  const ids = new Set([selected, selectedTemplateId()].filter(Boolean));
+  for (const id of ids) if (!templates.some(t => String(t.id) === id)) options.push(option(id, 'Шаблон #' + id + ' · недоступен для этой сделки'));
   options.push(...templates.map(t => option(String(t.id), t.name + ' · #' + t.id)));
-  $('documentTemplateId').replaceChildren(...options);
-  $('documentTemplateId').value = selected;
-  $('documentTemplateId').disabled = !connected || !state.activeDealId;
-  $('refreshTemplatesBtn').disabled = !connected || !state.activeDealId || busy;
-  $('templatesHint').textContent = !connected ? 'Шаблоны загружаются из генератора документов Битрикс24 после подключения сделки.'
-    : templatesLoaded ? (templates.length ? 'Шаблон выбирается для текущего варианта КП. Покрытие и срок передаются в поля вашего DOCX.' : 'Для этой сделки нет доступных активных шаблонов.')
-      : 'Обновите список шаблонов для этой сделки.';
+  $('defaultDocumentTemplateId').replaceChildren(...options);
+  $('defaultDocumentTemplateId').value = selected;
+  $('defaultDocumentTemplateId').disabled = !connected || !state.activeDealId || !adapter.canManageSettings() || busy || sharedTemplate.loading || !sharedTemplate.loaded;
+  $('refreshTemplatesBtn').disabled = !connected || !state.activeDealId || busy || sharedTemplate.loading;
+  const activeTemplate = templates.find(t => String(t.id) === selectedTemplateId());
+  $('templateSummary').textContent = sharedTemplate.loading ? 'Загружаю общий шаблон КП…'
+    : sharedTemplate.error ? 'Общий шаблон КП недоступен: ' + sharedTemplate.error
+    : selectedTemplateId() ? 'Общий шаблон КП: ' + (activeTemplate ? activeTemplate.name + ' · #' + activeTemplate.id : '#' + selectedTemplateId())
+    : 'Общий шаблон КП не выбран. Администратор может задать его в настройках.';
+  $('templatesHint').textContent = sharedTemplate.error || (!connected ? 'Шаблоны загружаются из генератора документов Битрикс24 после подключения сделки.'
+    : templatesLoaded ? (templates.length ? (adapter.canManageSettings() ? 'Выберите шаблон и нажмите «Сохранить настройки». Он будет общим для всех менеджеров приложения.' : 'Используется общий шаблон. Для его изменения обратитесь к администратору.') : 'Для этой сделки нет доступных активных шаблонов.')
+      : 'Обновите список шаблонов для этой сделки.');
   renderDocumentControls();
+}
+async function refreshSharedTemplate() {
+  sharedTemplate.loading = true; renderTemplates();
+  try {
+    const id = await adapter.getQuoteTemplateId();
+    sharedTemplate = {id, loaded: true, loading: false, error: ''};
+  } catch (error) {
+    sharedTemplate = {id: '', loaded: false, loading: false, error: safeError(error)};
+    throw error;
+  } finally { renderTemplates(); }
 }
 async function refreshTemplates() {
   if (!connected || !state.activeDealId) return;
@@ -360,11 +379,8 @@ async function refreshTemplates() {
 function previewSnapshot() {
   return currentVariant().versions.find(s => s.snapshotId === $('quoteDialog').dataset.snapshotId);
 }
-function previewTemplateId(snapshot = previewSnapshot()) {
-  return snapshot?.documentTemplateId || selectedTemplateId();
-}
 function previewDocument(snapshot = previewSnapshot()) {
-  return (currentVariant().documents || []).findLast(record => record.snapshotId === snapshot?.snapshotId && String(record.templateId) === previewTemplateId(snapshot));
+  return (currentVariant().documents || []).findLast(record => record.snapshotId === snapshot?.snapshotId && String(record.templateId) === selectedTemplateId());
 }
 function documentLinks(record) {
   const links = [];
@@ -379,25 +395,30 @@ function documentLinks(record) {
 }
 function renderDocumentControls() {
   const snapshot = previewSnapshot(), record = previewDocument(snapshot);
-  const canCreate = connected && state.scope !== 'demo' && snapshot && String(snapshot.dealId) === String(state.activeDealId) && previewTemplateId(snapshot);
-  $('generateDocumentBtn').disabled = busy || !canCreate || Boolean(record);
+  const canCreate = connected && sharedTemplate.loaded && state.scope !== 'demo' && snapshot && String(snapshot.dealId) === String(state.activeDealId) && selectedTemplateId();
+  $('generateDocumentBtn').disabled = busy || sharedTemplate.loading || !sharedTemplate.loaded || !canCreate || Boolean(record);
   $('refreshDocumentBtn').disabled = busy || !record || !connected;
   $('documentResult').hidden = !snapshot;
   $('documentResult').replaceChildren();
   if (record) {
     $('documentResult').append(element('p', {text: 'Документ #' + record.id + (record.conversionError ? ' создан, но Битрикс24 сообщил об ошибке преобразования PDF.' : record.pdfUrl ? ' готов.' : ' создан. PDF ещё формируется — обновите его готовность.')}), ...documentLinks(record));
   } else if (snapshot) {
-    $('documentResult').textContent = canCreate ? 'Товары этой версии заменят товары сделки. После проверки записи будет создан документ по шаблону #' + previewTemplateId(snapshot) + '.'
-      : 'Для генерации документа подключите сделку и выберите зарегистрированный шаблон.';
+    $('documentResult').textContent = canCreate ? 'Товары этой версии заменят товары сделки. После проверки записи будет создан документ по общему шаблону #' + selectedTemplateId() + '.'
+      : 'Для генерации документа подключите сделку. Общий шаблон выбирается администратором в настройках.';
   }
 }
 async function generateDocument() {
   if (busy) return;
-  const snapshot = previewSnapshot(), templateId = previewTemplateId(snapshot), variant = currentVariant();
+  const snapshot = previewSnapshot(), variant = currentVariant();
+  let templateId = '';
   try {
-    if (!snapshot || !templateId || !connected || state.scope === 'demo') throw new Error('Подключите сделку и выберите шаблон КП.');
-    if (previewDocument(snapshot)) return;
+    if (!snapshot || !connected || state.scope === 'demo') throw new Error('Подключите сделку и выберите общий шаблон КП в настройках.');
     busy = true; recalc();
+    // Read the portal option again: another administrator may have changed it.
+    await refreshSharedTemplate();
+    templateId = selectedTemplateId();
+    if (!templateId) throw new Error('Администратор должен выбрать общий шаблон КП в настройках.');
+    if (previewDocument(snapshot)) return;
     status('Переношу товары выбранной версии в сделку и создаю документ КП…');
     const result = await adapter.createQuoteDocument(state.activeDealId, templateId, snapshot);
     variant.documents ||= [];
@@ -561,9 +582,11 @@ function showQuote(snapshot) {
   renderDocumentControls();
   openDialog('quoteDialog');
 }
-function settingsToForm() {
+function settingsToForm(resetTemplate = !$('settingsDialog').open) {
   const s = state.settings;
-  for (const key of ['dealId', 'pricesFileId', 'metalPricesFileId', 'historyFolderId', 'defaultDocumentTemplateId']) $(key === 'dealId' ? 'dealIdInput' : key).value = s[key] || '';
+  for (const key of ['dealId', 'pricesFileId', 'metalPricesFileId', 'historyFolderId']) $(key === 'dealId' ? 'dealIdInput' : key).value = s[key] || '';
+  renderTemplates();
+  if (resetTemplate) $('defaultDocumentTemplateId').value = selectedTemplateId();
   $('formulaMode').value = config.formulaMode;
   $('roundingMode').value = config.rounding;
   renderMetalPricesSummary();
@@ -571,7 +594,7 @@ function settingsToForm() {
 }
 function readSettingsForm() {
   const result = {...state.settings};
-  for (const key of ['dealId', 'pricesFileId', 'metalPricesFileId', 'historyFolderId', 'defaultDocumentTemplateId']) {
+  for (const key of ['dealId', 'pricesFileId', 'metalPricesFileId', 'historyFolderId']) {
     const value = $(key === 'dealId' ? 'dealIdInput' : key).value.trim();
     if (value && !/^[1-9]\d*$/.test(value)) throw new Error('ID сделки, файлов и папки должны быть положительными целыми числами.');
     result[key] = value;
@@ -673,7 +696,7 @@ async function connectDeal(id) {
         validateConfig(snapshot.config);
         let v = state.variants.find(v => v.id === snapshot.variantId);
         if (!v) {
-          v = {id: snapshot.variantId, name: snapshot.variantName || 'Вариант', draft: {companyName: snapshot.companyName, rows: migrateRows(clone(snapshot.rows), snapshot.config, snapshot.metalPrices), currency: snapshot.currency, documentTemplateId: snapshot.documentTemplateId || '', documentFields: {...clone(defaultDocumentFields), ...snapshot.documentFields}, managerOverrides: Object.fromEntries(managerFields.map(key => [key, true]))}, versions: [], documents: [],
+          v = {id: snapshot.variantId, name: snapshot.variantName || 'Вариант', draft: {companyName: snapshot.companyName, rows: migrateRows(clone(snapshot.rows), snapshot.config, snapshot.metalPrices), currency: snapshot.currency, documentFields: {...clone(defaultDocumentFields), ...snapshot.documentFields}, managerOverrides: Object.fromEntries(managerFields.map(key => [key, true]))}, versions: [], documents: [],
             context: {config: clone(snapshot.config), priceMeta: clone(snapshot.priceMeta || {}), metalPrices: clone(snapshot.metalPrices || null), metalPriceMeta: clone(snapshot.metalPriceMeta || {source: 'unconfigured'})}};
           state.variants.push(v);
         }
@@ -734,8 +757,10 @@ function bindEvents() {
   $('variantName').addEventListener('input', e => { currentVariant().name = e.target.value.trim() || 'Без названия'; remember(); });
   $('variantName').addEventListener('change', renderVariants);
   $('variantSelect').addEventListener('change', e => activateVariant(e.target.value));
-  $('documentTemplateId').addEventListener('change', e => { draft().documentTemplateId = e.target.value; remember(); renderDocumentControls(); });
-  $('refreshTemplatesBtn').addEventListener('click', refreshTemplates);
+  $('refreshTemplatesBtn').addEventListener('click', async () => {
+    try { await refreshSharedTemplate(); await refreshTemplates(); $('defaultDocumentTemplateId').value = selectedTemplateId(); }
+    catch (error) { settingsMessage(safeError(error)); }
+  });
   $('generateDocumentBtn').addEventListener('click', generateDocument);
   $('refreshDocumentBtn').addEventListener('click', refreshDocument);
   $('fillManagerBtn').addEventListener('click', () => refreshManagerProfile(true));
@@ -797,7 +822,6 @@ function bindEvents() {
       priceMeta = clone(snapshot.priceMeta || {});
       metalPrices = snapshot.metalPrices ? validateMetalPrices(snapshot.metalPrices) : null;
       metalPriceMeta = clone(snapshot.metalPriceMeta || {source: 'unconfigured'});
-      currentVariant().draft.documentTemplateId = snapshot.documentTemplateId || '';
       currentVariant().draft.documentFields = {...clone(defaultDocumentFields), ...snapshot.documentFields};
       currentVariant().draft.managerOverrides = Object.fromEntries(managerFields.map(key => [key, true]));
       state.settings.formulaMode = config.formulaMode; state.settings.rounding = config.rounding;
@@ -817,10 +841,24 @@ function bindEvents() {
       settingsMessage('Диагностика выделена. Нажмите Ctrl+C для копирования.');
     }
   });
-  $('settingsForm').addEventListener('submit', e => {
+  $('settingsForm').addEventListener('submit', async e => {
     e.preventDefault();
-    try { keepSettings(); closeDialog('settingsDialog'); render(); status('Настройки сохранены.', 'success'); }
+    if (busy || sharedTemplate.loading) return;
+    try {
+      const next = readSettingsForm();
+      const nextConfig = validateConfig({...config, formulaMode: next.formulaMode, rounding: next.rounding});
+      const templateId = $('defaultDocumentTemplateId').value;
+      if (templateId !== selectedTemplateId()) {
+        if (!connected || !state.activeDealId || !sharedTemplate.loaded) throw new Error('Подключите сделку и загрузите общий шаблон КП.');
+        if (!templates.some(template => String(template.id) === templateId)) throw new Error('Выберите доступный зарегистрированный шаблон КП.');
+        busy = true; renderTemplates();
+        sharedTemplate.id = await adapter.setQuoteTemplateId(templateId);
+      }
+      config = nextConfig; state.settings = next; remember();
+      closeDialog('settingsDialog'); render(); status('Настройки сохранены.', 'success');
+    }
     catch (error) { settingsMessage(safeError(error)); }
+    finally { busy = false; recalc(); renderTemplates(); }
   });
   $('loadRemoteBtn').addEventListener('click', loadRemote);
   $('loadMetalPricesBtn').addEventListener('click', loadMetalPrices);
@@ -848,7 +886,6 @@ function bindEvents() {
     if (snapshot) showQuote(snapshot);
   });
   for (const name of ['Settings', 'History', 'Product', 'Quote']) $('close' + name + 'Btn').addEventListener('click', () => closeDialog(name.toLowerCase() + 'Dialog'));
-  $('printBtn').addEventListener('click', () => window.print());
 }
 function updateConnectionDiagnostics() {
   const diagnostics = window.YUZM_BX24?.diagnostics?.() || {sdk_available: Boolean(window.BX24?.init)};
@@ -900,6 +937,8 @@ async function connectPortal() {
     connected = true;
     connectionCode = 'CONNECTED';
     render(); connectionMessage('Bitrix24 подключён. Доступ к REST API подтверждён.');
+    try { await refreshSharedTemplate(); }
+    catch (error) { status('Не удалось загрузить общий шаблон КП: ' + safeError(error), 'error'); }
     const dealId = connection.dealId || state.settings.dealId;
     if (dealId && (state.scope === 'demo' || String(state.activeDealId) !== String(dealId))) {
       try { await connectDeal(String(dealId)); } catch (error) { status(safeError(error), 'error'); }
@@ -925,7 +964,7 @@ async function boot() {
     state = freshState();
     const stored = readStored('demo'); if (stored) restore(stored);
     try { const settings = JSON.parse(localStorage.getItem(STORE + '-settings')); if (settings) state.settings = {...state.settings, ...settings}; } catch {}
-    delete state.settings.documentFields; delete state.settings.relationsFileId;
+    delete state.settings.documentFields; delete state.settings.relationsFileId; delete state.settings.defaultDocumentTemplateId;
     bindEvents(); render();
     await connectPortal();
   } catch (error) {

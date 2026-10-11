@@ -35,7 +35,8 @@ with sync_playwright() as p:
 
     expect(page.locator('#shipmentDate, [data-field=nonstandard]')).to_have_count(0)
     expect(page.locator('#columnHeaders')).not_to_contain_text('Особые условия')
-    passed('unused shipment date and nonstandard marker are removed')
+    expect(page.locator('#printBtn, #documentTemplateId')).to_have_count(0)
+    passed('unused shipment date, nonstandard marker, preview printing and per-variant template selector are removed')
 
     color_row = page.locator('.item-row').last
     color_row.locator('[data-field=ralColor]').fill('9005 матовый')
