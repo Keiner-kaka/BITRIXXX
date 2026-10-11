@@ -1,4 +1,6 @@
 /* Bitrix24 application transport. No webhook URLs or application secrets are stored here. */
+import { parseNumber } from './calculator.js';
+
 const ALLOWED_METHODS = new Set([
   'crm.deal.get', 'crm.deal.productrows.get', 'crm.deal.productrows.set',
   'crm.item.productrow.set', 'crm.company.get', 'crm.contact.get',
@@ -7,10 +9,28 @@ const ALLOWED_METHODS = new Set([
   'catalog.product.offer.list', 'catalog.product.offer.get',
   'catalog.product.sku.list', 'catalog.product.sku.get',
   'catalog.priceType.list', 'catalog.price.list',
+  'crm.documentgenerator.template.list', 'crm.documentgenerator.template.get',
+  'crm.documentgenerator.document.add', 'crm.documentgenerator.document.get',
   'disk.file.get', 'disk.folder.getChildren', 'disk.folder.uploadFile',
   'placement.bind', 'placement.get',
 ]);
 const MAX_JSON_BYTES = 5 * 1024 * 1024;
+const DOCUMENT_FIELDS = [
+  'YuzmPaymentTerms', 'YuzmFastenerTerms', 'YuzmDocumentsTerms', 'YuzmDeliveryTerms',
+  'YuzmValidityTerms', 'YuzmManagerPosition', 'YuzmManagerName', 'YuzmManagerPhone',
+];
+const DOCUMENT_ITEM_FIELDS = {
+  ProductsIndex: 'KpItems.INDEX',
+  ProductsProductName: 'KpItems.Item.Name',
+  YuzmCoating: 'KpItems.Item.Coating',
+  ProductsProductQuantity: 'KpItems.Item.Quantity',
+  ProductsProductPriceBrutto: 'KpItems.Item.Price',
+  ProductsProductPriceBruttoSum: 'KpItems.Item.Total',
+  YuzmDeliveryPeriod: 'KpItems.Item.ExecutionTerm',
+};
+const DOCUMENT_MONEY = new Intl.NumberFormat('ru-RU', {
+  minimumFractionDigits: 2, maximumFractionDigits: 2,
+});
 
 function id(value, label = 'ID') {
   const text = String(value ?? '').trim();
@@ -31,6 +51,36 @@ function currency(value) {
   const result = String(value ?? '').toUpperCase();
   if (!/^[A-Z]{3}$/.test(result)) throw new Error('API не вернул корректную валюту.');
   return result;
+}
+
+function documentText(value, label, required = false) {
+  if (value === undefined || value === null) value = '';
+  if (typeof value !== 'string' || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) {
+    throw new Error(`${label}: требуется текст.`);
+  }
+  if (value.length > 10000) throw new Error(`${label}: текст превышает 10 000 символов.`);
+  if (required && !value.trim()) throw new Error(`${label}: заполните поле.`);
+  // Commercial text is transferred as entered, including intentional spacing
+  // and line breaks. Treat whitespace-only optional fields as empty.
+  return value.trim() ? value : '';
+}
+
+function documentMoney(value, label) {
+  if (!['string', 'number'].includes(typeof value)) throw new Error(`${label}: требуется конечное число.`);
+  const result = number(value, label);
+  if (result < 0) throw new Error(`${label}: отрицательные суммы нельзя передать в документ.`);
+  if (!Number.isSafeInteger(Math.round(result * 100))) throw new Error(`${label}: сумма превышает допустимый диапазон.`);
+  return result;
+}
+
+function documentTemplate(raw, categoryId) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Bitrix24 вернул некорректный шаблон документа.');
+  const templateId = id(raw.id, 'ID шаблона');
+  const name = documentText(raw.name, 'Название шаблона', true);
+  const bindings = Array.isArray(raw.entityTypeId) ? raw.entityTypeId.map(String) : [];
+  const available = raw.active === 'Y' && raw.isDeleted !== 'Y'
+    && bindings.some(binding => binding === '2' || binding === `2_category_${categoryId}`);
+  return { id: templateId, name, available };
 }
 
 function apiError(method, result) {
@@ -203,7 +253,13 @@ export class BitrixAdapter {
         try {
           if (result.error()) return finish(apiError(method, result));
           const data = result.data();
-          const page = key ? data?.[key] : data;
+          let page = key ? data?.[key] : data;
+          // CRM template.list returns templates keyed by ID rather than an array.
+          // Keep every other list method's response validation strict.
+          if (method === 'crm.documentgenerator.template.list' && key === 'templates'
+            && page && typeof page === 'object' && !Array.isArray(page)) {
+            page = Object.values(page);
+          }
           if (!Array.isArray(page)) return finish(new Error(`Bitrix24: ${method} — нет массива ${key ?? 'result'}.`));
           items.push(...page);
           pages += 1;
@@ -382,6 +438,142 @@ export class BitrixAdapter {
       currency: dealCurrency, source: 'deal', raw: { ...row },
     }));
     return { id: dealId, title: String(deal.TITLE ?? ''), companyName, currency: dealCurrency, rows };
+  }
+
+  async _documentDeal(value) {
+    const dealId = id(value, 'ID сделки');
+    const deal = await this.call('crm.deal.get', { id: Number(dealId) });
+    // The document generator itself does not verify that its source deal exists.
+    if (String(deal?.ID) !== dealId) throw new Error('Bitrix24 не подтвердил существование выбранной сделки.');
+    const categoryText = String(deal.CATEGORY_ID ?? '').trim();
+    const categoryId = Number(categoryText);
+    if (!/^\d+$/.test(categoryText) || !Number.isSafeInteger(categoryId) || categoryId < 0) {
+      throw new Error('Bitrix24 не вернул корректное направление сделки для выбора шаблона.');
+    }
+    return { id: dealId, categoryId: String(categoryId), currency: currency(deal.CURRENCY_ID) };
+  }
+
+  async listDocumentTemplates(dealValue) {
+    const deal = await this._documentDeal(dealValue);
+    const templates = await this._list('crm.documentgenerator.template.list', {
+      select: ['id', 'name', 'active', 'isDeleted', 'entityTypeId'],
+      filter: { active: 'Y', isDeleted: 'N', entityTypeId: ['2', `2_category_${deal.categoryId}`] },
+      order: { name: 'ASC', id: 'ASC' },
+    }, 'templates');
+    const available = templates.map(raw => documentTemplate(raw, deal.categoryId)).filter(template => template.available);
+    return [...new Map(available.map(({ id, name }) => [id, { id, name }])).values()];
+  }
+
+  _documentUrl(value) {
+    if (value === undefined || value === null || value === '') return '';
+    if (typeof value !== 'string') throw new Error('Bitrix24 вернул некорректную ссылку документа.');
+    let portalBase;
+    try {
+      const domain = this.sdk?.getDomain?.();
+      if (typeof domain === 'string' && domain) portalBase = /^https?:\/\//i.test(domain) ? domain : `https://${domain}/`;
+    } catch { /* Absolute URLs do not need the portal domain. */ }
+    let url;
+    try { url = new URL(value, portalBase ?? this.location?.href); }
+    catch { throw new Error('Bitrix24 вернул некорректную ссылку документа.'); }
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+      throw new Error('Bitrix24 вернул недопустимую ссылку документа.');
+    }
+    return url.href;
+  }
+
+  _document(raw, expected = {}) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Bitrix24 не вернул созданный документ.');
+    const documentId = id(raw.id, 'ID документа');
+    if (expected.id && documentId !== expected.id) throw new Error('Bitrix24 вернул другой ID документа.');
+    for (const field of ['templateId', 'entityId', 'entityTypeId']) {
+      if (expected[field] !== undefined && raw[field] !== undefined && String(raw[field]) !== String(expected[field])) {
+        throw new Error('Bitrix24 вернул документ другого шаблона или сделки.');
+      }
+    }
+    return {
+      id: documentId,
+      title: documentText(raw.title, 'Название документа'),
+      downloadUrl: this._documentUrl(raw.downloadUrl),
+      pdfUrl: this._documentUrl(raw.pdfUrl),
+      publicUrl: this._documentUrl(raw.publicUrl),
+      conversionError: [true, 1, '1', 'Y'].includes(raw.isTransformationError),
+    };
+  }
+
+  async createQuoteDocument(dealValue, templateValue, snapshot) {
+    const dealId = id(dealValue, 'ID сделки');
+    const templateId = id(templateValue, 'ID шаблона');
+    if (!snapshot || String(snapshot.dealId) !== dealId) throw new Error('Снимок КП относится к другой сделке.');
+    if (snapshot.valid === false || (Array.isArray(snapshot.errors) && snapshot.errors.length)
+      || !Array.isArray(snapshot.rows) || !snapshot.rows.length) {
+      throw new Error('Нет корректных позиций для создания документа.');
+    }
+    const quoteCurrency = currency(snapshot.currency ?? snapshot.config?.currency);
+    const companyName = documentText(snapshot.companyName, 'Наименование компании', true);
+    const total = documentMoney(snapshot.total, 'Итого КП');
+    let rowCents = 0;
+    const items = snapshot.rows.map((row, index) => {
+      if (!row || typeof row !== 'object' || row.valid === false || (Array.isArray(row.errors) && row.errors.length)) {
+        throw new Error(`Позиция ${index + 1}: исправьте ошибки расчёта.`);
+      }
+      if (currency(row.currency ?? quoteCurrency) !== quoteCurrency) throw new Error('В КП смешаны валюты.');
+      const quantity = parseNumber(row.quantity);
+      if (!Number.isFinite(quantity)) throw new Error('Количество: требуется конечное число.');
+      if (quantity <= 0) throw new Error('Количество должно быть положительным.');
+      const price = documentMoney(row.unitPrice, 'Цена единицы');
+      const lineTotal = documentMoney(row.lineTotal, 'Сумма строки');
+      rowCents += Math.round(lineTotal * 100);
+      if (!Number.isSafeInteger(rowCents)) throw new Error('Итого КП превышает допустимый диапазон.');
+      const coating = snapshot.config?.coatings?.find(entry => entry.code === row.coatingCode);
+      return {
+        Name: documentText(row.productName, `Наименование позиции ${index + 1}`, true),
+        Coating: documentText(row.coatingName ?? coating?.name ?? row.coatingCode ?? '', 'Покрытие'),
+        Quantity: String(quantity).replace('.', ','),
+        Price: DOCUMENT_MONEY.format(price),
+        Total: DOCUMENT_MONEY.format(lineTotal),
+        ExecutionTerm: documentText(row.executionTerm, 'Срок исполнения'),
+      };
+    });
+    if (rowCents !== Math.round(total * 100)) throw new Error('Итого КП отличается от суммы товарных строк.');
+    const fields = {
+      KpItems: {
+        PROVIDER: 'Bitrix\\DocumentGenerator\\DataProvider\\ArrayDataProvider',
+        OPTIONS: { ITEM_NAME: 'Item', ITEM_PROVIDER: 'Bitrix\\DocumentGenerator\\DataProvider\\HashDataProvider' },
+      },
+    };
+    // Replace standard CRM descriptors too: their Money/provider metadata must
+    // not format these iterator chains before the DOCX table is expanded.
+    for (const [placeholder, chain] of Object.entries(DOCUMENT_ITEM_FIELDS)) fields[placeholder] = { VALUE: chain };
+    fields.RequisiteRqCompanyName = { VALUE: companyName };
+    fields.TotalSum = { VALUE: DOCUMENT_MONEY.format(total) };
+    for (const placeholder of DOCUMENT_FIELDS) {
+      fields[placeholder] = { VALUE: documentText(snapshot.documentFields?.[placeholder], placeholder) };
+    }
+    const deal = await this._documentDeal(dealId);
+    if (deal.currency !== quoteCurrency) throw new Error('Валюта сделки отличается от валюты КП.');
+    const response = await this.call('crm.documentgenerator.template.get', { id: Number(templateId) });
+    const template = documentTemplate(response?.template, deal.categoryId);
+    if (template.id !== templateId || !template.available) throw new Error('Выбранный шаблон удалён, неактивен или недоступен для направления этой сделки.');
+    const created = await this.call('crm.documentgenerator.document.add', {
+      templateId: Number(templateId), entityTypeId: 2, entityId: Number(dealId),
+      values: { KpItems: items }, fields,
+    });
+    try {
+      return this._document(created?.document, { templateId, entityId: dealId, entityTypeId: '2' });
+    } catch (error) {
+      let documentId;
+      try { documentId = id(created?.document?.id, 'ID документа'); } catch { throw error; }
+      const unverified = new Error(`Bitrix24 вернул документ #${documentId}, но его данные или ссылки не подтверждены. Проверьте документ перед повторным созданием.`);
+      unverified.code = 'DOCUMENT_RESPONSE_UNVERIFIED';
+      unverified.documentId = documentId;
+      throw unverified;
+    }
+  }
+
+  async getQuoteDocument(value) {
+    const documentId = id(value, 'ID документа');
+    const response = await this.call('crm.documentgenerator.document.get', { id: Number(documentId) });
+    return this._document(response?.document, { id: documentId });
   }
 
   async loadDiskJson(value) {

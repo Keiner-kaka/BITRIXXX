@@ -1,12 +1,13 @@
 {
-  "version": "pilot-ui-1",
+  "version": "pilot-ui-2",
+  "calculationVersion": 2,
   "currency": "RUB",
   "formulaMode": "catalog",
   "rounding": "line",
   "coatings": [
-    {"code": "none", "name": "Без покрытия", "coefficient": 1},
-    {"code": "zinc", "name": "Горячее цинкование", "coefficient": 1.18},
-    {"code": "paint", "name": "Окраска", "coefficient": 1.12},
-    {"code": "bitumen", "name": "Битумный лак", "coefficient": 1.05}
+    {"code": "none", "name": "Без покрытия"},
+    {"code": "zinc", "name": "Горячее цинкование"},
+    {"code": "paint", "name": "Окраска"},
+    {"code": "bitumen", "name": "Битумный лак"}
   ]
 }

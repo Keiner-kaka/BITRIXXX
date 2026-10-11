@@ -1,34 +1,77 @@
-# Internal module contract
+# Контракты модулей
 
-Vanilla browser JavaScript with ES modules, no build step. Node tests use ESM.
+JavaScript-модули браузера без сборки. Тесты Node.js используют ESM. UI и сообщения пользователю — на русском языке.
 
-## Calculator (`src/calculator.js`)
+## Калькулятор (`src/calculator.js`)
 
-Exports `parseNumber(value)`, `formatMoney(value, currency='RUB')`, `validateConfig(raw)`, `normalizeRelations(raw)`, `resolveRelations(productId, relations)`, `calculateQuote(rows, config)`.
+Экспорты: `parseNumber(value)`, `formatMoney(value, currency='RUB')`, `validateConfig(raw)`, `validateMetalPrices(raw)`, `calculateQuote(rows, config)`.
 
-`validateConfig` returns normalized `{version,currency,coatings:[{code,name,coefficient}],formulaMode:'catalog'|'excel',rounding:'unit'|'line'}`. Ignore legacy `prices_per_kg` (weight is excluded); do not require production names. Reject invalid coefficients, duplicate coating codes, unsupported currency/formula/rounding.
+`validateConfig` нормализует `{version,currency,coatings:[{code,name}],formulaMode,rounding,calculationVersion:2}`. Режимы — `catalog`/`excel`, округление — `unit`/`line`. Уникальные коды покрытий обязательны; старый `coefficient` игнорируется. Поле `prices_per_kg` не загружает цены через настройки покрытий. `version` справочника не определяет формулу. Валюта по умолчанию `RUB`.
 
-Rows: `{id,productId,productName,basePrice,currency,quantity,coatingCode,k1,k2,fasteners,extraCoating,delivery,drawingId,nonstandard}`. Numeric fields may be strings with decimal commas. Blank and non-finite input is invalid. K1/K2 allow zero and negative numbers. Quantity must be positive; allow decimal quantities. Base price and additive costs must be >= 0. Currency must match config (no automatic conversion).
+`validateMetalPrices` принимает отдельный `{version,currency,prices_per_kg}`. Ключи — положительные безопасные целые ID товаров, значения — конечные неотрицательные цены за кг. Возвращает нормализованный справочник; пустые и некорректные данные отклоняются. Цена отсутствующего товара не заменяется нулём.
 
-`catalog`: unit = basePrice * coatingCoefficient * k1 * k2.
-`excel`: unit = (basePrice + fasteners + extraCoating + delivery) * k1 * k2. This reproduces the attached Excel formula with catalog base replacing weight*rate; coating multiplier is NOT also applied in this mode.
+Общие поля строки: `{id,productId,productName,currency,quantity,coatingCode,k1,k2,k3,executionTerm,nonstandard}`. Каталог дополнительно использует `basePrice`; Excel — `pricePerKg`, `weight`, `fasteners`.
 
-Round monetary values to 2 decimals. `unit`: round unit, then round unit*quantity. `line`: round rawUnit*quantity, display rounded unit. Return `{rows:[{...row,unitPrice,lineTotal,coatingFactor,valid,errors:[]}],total,quantity,valid,errors:[]}`. Invalid rows must prevent readiness, not silently yield a usable partial total.
+```text
+catalog: unit = basePrice × k1 × k2 × k3
+excel:   unit = pricePerKg × weight × k1 × k2 × k3 + fasteners
+lineTotal = unit × quantity
+```
 
-Relations JSON: `{version,product_drawings:[{product_id,product_name?,drawing_id,drawing_name?,drawing_file_id?}],drawing_kd:[{drawing_id,kit_id,kit_name?,file_id?,file_name?}]}`. IDs stored as strings. Multiple product drawings allowed; never silently pick one when ambiguous. KD records can contain many files per kit. `resolveRelations` returns `{drawings:[{id,name,fileId,kits:[{id,name,files:[{id,name}]}]}]}`. Reject duplicate product/drawing pairs, dangling drawing references, inconsistent drawing/kit metadata, malformed IDs.
+Вес и метизы относятся к единице изделия. К3 вводится вручную; покрытие служит только наименованием. `extraCoating` и `delivery` не участвуют в новой формуле. `executionTerm` — текст, сохраняемый и передаваемый в документ.
 
-## Bitrix (`src/bitrix.js`)
+Числа допускают десятичную запятую. Пустой и нечисловой ввод, бесконечность и неверная валюта ошибочны. К1/К2/К3 допускают ноль и отрицательные значения. Количество и вес положительны; цены и метизы неотрицательны. В каталоге вес не проверяется, в Excel базовая цена каталога не заменяет стоимость металла.
 
-Class `BitrixAdapter` exports async `init()` -> `{connected,dealId}`, `call(method,params)`, `loadDeal(id)` -> `{id,title,companyName,currency,rows}`; `searchProducts(query)` -> `[{id,name,basePrice,currency,verified:true}]`; `getProduct(id)` same object; `loadDiskJson(fileId)` -> `{data,fileId,version,name}`; `registerPlacement(title)`; `loadHistory(folderId,dealId)` -> array snapshots; `saveSnapshot(folderId,snapshot)` -> `{fileId,name}`; `applyToDeal(dealId,snapshot)` -> write result.
+Деньги округляются до двух знаков. `unit`: сначала цена единицы, затем произведение на количество. `line`: сумма строки из неокруглённой цены; отображаемая цена округляется отдельно. Результат: `{rows:[{...row,unitPrice,lineTotal,valid,errors}],total,quantity,valid,errors}`. При неверной строке `valid:false`, готовый итог отсутствует: частичный расчёт не считается предложением.
 
-Never write catalog fields. Use BX24 SDK from original app, application auth. Paginate lists; retrieve base catalog prices explicitly (`catalog.price.list`, filter price group BASE). Modern catalog then validated legacy fallback. Do not quietly treat missing prices as zero. Offers/SKU must be handled or report unsupported. Load deal product rows with existing negotiated prices. Placement registration is explicit setup button only.
+## REST-адаптер (`src/bitrix.js`)
 
-Disk snapshots immutable and unique file names `yuzm-kp-deal-{dealId}-{variantId}-v{version}-{snapshotId}.json`. Shared history only when folder configured and upload/read supported; label local-only history honestly. API paths/values must not expose tokens in errors. Apply must replace entire deal rows only after UI shows explicit confirmation, recheck current deal rows against preview fingerprint, and read back values to verify. Prevent append duplicates. Adapter may accept expected fingerprint optional third arg to applyToDeal. Export `fingerprintRows(rows)`.
+`BitrixAdapter` использует официальный BX24 SDK и авторизацию установленного приложения. Основные методы:
 
-## UI (`index.html`, `styles.css`)
+| Метод | Результат/назначение |
+| --- | --- |
+| `init()` | `{connected,dealId}` |
+| `call(method,params)` | Вызов SDK с обработкой ошибок |
+| `loadDeal(id)` | Сделка, клиент, валюта и существующие товарные строки |
+| `searchProducts(query)`, `getProduct(id)` | Товары с подтверждённой базовой ценой и валютой |
+| `loadDiskJson(fileId)` | `{data,fileId,version,name}`; общий способ чтения обоих справочников |
+| `registerPlacement(title)` | Явная регистрация вкладки |
+| `loadHistory(folderId,dealId)` | Снимки конкретной сделки |
+| `saveSnapshot(folderId,snapshot)` | Новый файл `{fileId,name}` |
+| `applyToDeal(dealId,snapshot,expectedFingerprint)` | Замена строк с проверкой состояния и чтением результата |
+| `listDocumentTemplates(dealId)` | Зарегистрированные доступные шаблоны |
+| `createQuoteDocument(dealId,templateId,snapshot)` | Создание CRM-документа из снимка |
+| `getQuoteDocument(id)` | Обновление состояния уже созданного документа |
 
-Other agent owns only HTML/CSS. Root owns app.js and adapters. All visible text Russian, calm blue/white UI based on supplied screenshot. No required weight/production fields.
+Списки обходятся с пагинацией. Базовая цена каталога запрашивается отдельно через `catalog.price.list` с базовой группой цен; применяется проверенный legacy fallback. Отсутствие цены не подменяется нулём. SKU поддерживается доступными API либо приводит к понятной ошибке. Поля каталога не записываются. Чтение существующих товаров сделки сохраняет их договорные цены и налоговые параметры.
 
-DOM IDs: `connectionBadge`, `dealBadge`, `saveBtn`, `settingsBtn`, `status`, `companyName`, `shipmentDate`, `variantSelect`, `variantName`, `newVariantBtn`, `duplicateVariantBtn`, `historyBtn`, `itemsBody`, `addItemBtn`, `quantityTotal`, `grandTotal`, `formulaHint`, `createQuoteBtn`, `applyDealBtn`, `docsBody`, `downloadBtn`, `relationsSummary`, `relationsBody`, `toggleRelationsBtn`, `settingsDialog`, `settingsForm`, `closeSettingsBtn`, `dealIdInput`, `catalogQuery`, `searchCatalogBtn`, `catalogResults`, `relationsFileId`, `pricesFileId`, `historyFolderId`, `loadRemoteBtn`, `localRelationsInput`, `localPricesInput`, `formulaMode`, `roundingMode`, `registerPlacementBtn`, `connectDealBtn`, `resetDemoBtn`, `settingsError`, `historyDialog`, `closeHistoryBtn`, `historyBody`, `productDialog`, `closeProductBtn`, `productQuery`, `productSearchBtn`, `productResults`, `quoteDialog`, `closeQuoteBtn`, `quotePreview`, `printBtn`.
+Снимки имеют уникальные имена `yuzm-kp-deal-{dealId}-{variantId}-v{version}-{snapshotId}.json`. История считается общей только при работающей загрузке и чтении папки. Ошибки не должны раскрывать токены или URL с авторизацией.
 
-`itemsBody`: dynamic rows DIV grid: name/base-price, coating, quantity, k1/k2, drawing/KD, optional nonstandard/delete. `docsBody`: related files dynamically. Native dialogs with keyboard support. Settings include integration config, Disk imports, formula mode, rounding choice. If table headers need IDs use `columnHeaders`. Include `<script type="module" src="src/app.js"></script>` and original BX24 SDK `<script src="https://api.bitrix24.tech/api/v1/"></script>`.
+`applyToDeal` заменяет весь набор строк после отдельного подтверждения в UI. Экспорт `fingerprintRows(rows)` нужен для сравнения со строками, показанными пользователю. Проверка до записи обнаруживает изменившуюся сделку; чтение после записи проверяет результат. Это не транзакция и не блокировка другого менеджера. Для CRM цена округляется до умножения на количество.
+
+## Генератор документов
+
+Методы адаптера используют `crm.documentgenerator.template.list`, `crm.documentgenerator.document.add` и `crm.documentgenerator.document.get`. Результат документа: `{id,title,downloadUrl,pdfUrl,publicUrl}`; ссылки появляются только при наличии в ответе, PDF может быть ещё не готов.
+
+В `document.add` передаётся ID сделки и зарегистрированный `templateId`. Товарная таблица создаётся из сохранённого КП через массив `KpItems`, `ArrayDataProvider` и дескрипторы переопределения меток. Сопоставление исходному пользовательскому DOCX:
+
+- `ProductsIndex`, `ProductsProductName`, `ProductsProductQuantity` — номер, название и количество строки.
+- `ProductsProductPriceBrutto`, `ProductsProductPriceBruttoSum` — расчётная цена и сумма строки.
+- `YuzmCoating`, `YuzmDeliveryPeriod` — наименование покрытия и срок исполнения.
+- `TotalSum`, `RequisiteRqCompanyName` — итог и клиент сохранённого КП.
+
+Содержимое `data/templates/kp-yuzm-bitrix24.docx` не изменяется. Генерация не вызывает запись товарных строк сделки. Обновление PDF запрашивает существующий ID, а не повторяет `document.add`.
+
+`draft.documentFields` — объект конкретного варианта с разрешёнными текстовыми метками `YuzmPaymentTerms`, `YuzmFastenerTerms`, `YuzmDocumentsTerms`, `YuzmDeliveryTerms`, `YuzmValidityTerms`, `YuzmManagerPosition`, `YuzmManagerName`, `YuzmManagerPhone`. Сохранение копирует его в `snapshot.documentFields`, генерация использует значения снимка. Поля независимо копируются при дублировании варианта и восстанавливаются из локального состояния. Объект не создаёт связи с технической документацией или чертежами.
+
+Предустановки оплаты 40/60, 50/50 и 100% предоплаты заполняют редактируемый текст `YuzmPaymentTerms`. Начальные условия — из предоставленного образца; должность, имя и телефон менеджера изначально пустые. Адрес доставки образца не подставляется из реквизитов сделки и должен редактироваться для соответствующего КП. Полные исходные формулировки приведены в [data-format.md](data-format.md).
+
+## Состояние и интерфейс (`src/app.js`, `index.html`, `styles.css`)
+
+`defaultDocumentTemplateId` — шаблон по умолчанию в настройках; `documentTemplateId` — выбор конкретного черновика и снимка. Каждый вариант содержит отдельный реестр `documents:[{snapshotId,templateId,...doc,createdAt}]`. Обновление документа не меняет сохранённый снимок. Реестр сохраняется в локальных данных варианта; Диск хранит сами снимки, а не общий межбраузерный реестр ссылок.
+
+Новые снимки — `schemaVersion:2` с К3, сроками, клиентом, `documentFields` и настройками расчёта. Старые снимки `schemaVersion:1` открываются со своими сохранёнными суммами. При миграции старого каталожного черновика прежний множитель покрытия переносится в К3. Старому черновику Excel нужны цена за кг и вес; прежние доплаты не возвращаются в формулу автоматически.
+
+Настройки предоставляют отдельный импорт покрытий и цен металла с Диска или локального JSON. В строке есть покрытие, срок исполнения, количество и три коэффициента; в Excel дополнительно вес и метизы. Условия и менеджер редактируются в текущем варианте, выбор предустановки оплаты заполняет расположенное рядом текстовое поле. Действия сохранения версии, генерации документа и применения к сделке раздельны. Зарегистрированные шаблоны выбираются в настройках и для варианта. Документ можно открыть, а поздний PDF — получить обновлением статуса.
+
+Используются нативные диалоги и безопасный вывод текста. BX24 SDK подключается через `https://api.bitrix24.tech/api/v1/`, приложение — через `<script type="module" src="src/app.js"></script>`.

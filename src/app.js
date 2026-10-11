@@ -1,16 +1,31 @@
-import {calculateQuote, formatMoney, normalizeRelations, resolveRelations, validateConfig} from './calculator.js';
+import {calculateQuote, formatMoney, validateConfig, validateMetalPrices} from './calculator.js';
 import {BitrixAdapter, fingerprintRows} from './bitrix.js';
-import {products as demoProducts, initialRows, newRow, demoFile} from './demo.js';
+import {products as demoProducts, initialRows, newRow} from './demo.js';
 
 const $ = id => document.getElementById(id);
 const clone = value => structuredClone(value);
 const uid = () => crypto.randomUUID();
 const adapter = new BitrixAdapter();
 const STORE = 'yuzm-kp-prototype-v1';
-let config, relations, calculation, state, connected = false, busy = false, chosenRow = null;
-let catalogProducts = clone(demoProducts), relationMeta = {source: 'demo'}, priceMeta = {source: 'demo'};
+let config, calculation, state, metalPrices = null, connected = false, busy = false, chosenRow = null;
+let catalogProducts = clone(demoProducts), priceMeta = {source: 'demo'}, metalPriceMeta = {source: 'demo'};
+let templates = [], templatesLoaded = false;
 let previewFingerprint = null;
-const defaultSettings = {dealId: '', relationsFileId: '', pricesFileId: '', historyFolderId: '', formulaMode: 'catalog', rounding: 'line'};
+const documentFieldNames = ['YuzmPaymentTerms', 'YuzmFastenerTerms', 'YuzmDocumentsTerms', 'YuzmDeliveryTerms', 'YuzmValidityTerms', 'YuzmManagerPosition', 'YuzmManagerName', 'YuzmManagerPhone'];
+const paymentPresets = {
+  '40_60': '40% предоплата + 60% по факту готовности к отгрузке.',
+  '50_50': '50% предоплата + 50% по факту готовности к отгрузке.',
+  '100': '100% предоплата.'
+};
+const defaultDocumentFields = {
+  YuzmPaymentTerms: paymentPresets['50_50'],
+  YuzmFastenerTerms: 'В стоимость включен крепеж (гальваническое покрытие).',
+  YuzmDocumentsTerms: 'На продукцию выдается паспорт, сертификат соответствия.',
+  YuzmDeliveryTerms: 'Доставка в г. Краснодар, Ставропольская, 19 производится силами поставщика.',
+  YuzmValidityTerms: 'КП действительно в течение трех рабочих дней.',
+  YuzmManagerPosition: '', YuzmManagerName: '', YuzmManagerPhone: ''
+};
+const defaultSettings = {dealId: '', pricesFileId: '', metalPricesFileId: '', historyFolderId: '', defaultDocumentTemplateId: '', formulaMode: 'catalog', rounding: 'line'};
 const draft = () => currentVariant().draft;
 const currentVariant = () => state.variants.find(v => v.id === state.selectedVariantId);
 
@@ -48,17 +63,17 @@ function settingsMessage(message) {
 function openDialog(id) { $(id).showModal(); }
 function closeDialog(id) { $(id).close(); }
 function blankDraft(rows = []) {
-  return {companyName: 'ООО «КраснодарЭлектро»', shipmentDate: '', rows, currency: 'RUB'};
+  return {companyName: 'ООО «КраснодарЭлектро»', shipmentDate: '', rows, currency: 'RUB', documentTemplateId: state?.settings?.defaultDocumentTemplateId || '', documentFields: clone(defaultDocumentFields)};
 }
-function makeVariant(name, draftValue) { return {id: uid(), name, draft: draftValue, versions: []}; }
+function makeVariant(name, draftValue) { return {id: uid(), name, draft: draftValue, versions: [], documents: []}; }
 function freshState() {
   const variant = makeVariant('Основной вариант', blankDraft(clone(initialRows)));
-  return {schemaVersion: 1, scope: 'demo', activeDealId: null, settings: clone(defaultSettings), variants: [variant], selectedVariantId: variant.id};
+  return {schemaVersion: 2, scope: 'demo', activeDealId: null, settings: clone(defaultSettings), variants: [variant], selectedVariantId: variant.id};
 }
 function remember() {
   try {
-    currentVariant().context = {config: clone(config), relations: clone(relations), relationMeta: clone(relationMeta), priceMeta: clone(priceMeta)};
-    localStorage.setItem(STORE + '-' + state.scope, JSON.stringify({state, config, relations, relationMeta, priceMeta}));
+    currentVariant().context = {config: clone(config), priceMeta: clone(priceMeta), metalPrices: clone(metalPrices), metalPriceMeta: clone(metalPriceMeta)};
+    localStorage.setItem(STORE + '-' + state.scope, JSON.stringify({state, config, priceMeta, metalPrices, metalPriceMeta}));
     localStorage.setItem(STORE + '-settings', JSON.stringify(state.settings));
   } catch {
     status('Браузер не сохранил черновик. Скачайте JSON расчёта или сохраните версию на Диск.', 'error');
@@ -67,35 +82,47 @@ function remember() {
 function readStored(scope) {
   try {
     const value = JSON.parse(localStorage.getItem(STORE + '-' + scope));
-    if (!value || value.state?.schemaVersion !== 1 || value.state.scope !== scope || !Array.isArray(value.state.variants) || !value.state.variants.length) return null;
+    if (!value || ![1, 2].includes(value.state?.schemaVersion) || value.state.scope !== scope || !Array.isArray(value.state.variants) || !value.state.variants.length) return null;
     const safeConfig = validateConfig(value.config);
-    const safeRelations = normalizeRelations(value.relations);
+    if (value.metalPrices) validateMetalPrices(value.metalPrices);
     for (const variant of value.state.variants) {
       if (!variant.id || typeof variant.name !== 'string' || !Array.isArray(variant.draft?.rows) || !Array.isArray(variant.versions)) return null;
+      variant.draft.rows = migrateRows(variant.draft.rows, variant.context?.config || value.config, variant.context?.metalPrices || value.metalPrices);
+      if (variant.context?.metalPrices) validateMetalPrices(variant.context.metalPrices);
+      variant.draft.documentFields = {...clone(defaultDocumentFields), ...value.state.settings?.documentFields, ...variant.draft.documentFields};
+      variant.documents = Array.isArray(variant.documents) ? variant.documents : [];
     }
     if (!value.state.variants.some(v => v.id === value.state.selectedVariantId)) return null;
-    return {...value, config: safeConfig, relations: safeRelations};
+    value.state.schemaVersion = 2;
+    return {...value, config: safeConfig};
   } catch { return null; }
 }
 function restore(value) {
-  state = value.state; config = value.config; relations = value.relations;
-  relationMeta = value.relationMeta || {}; priceMeta = value.priceMeta || {};
+  state = value.state; config = value.config;
+  state.settings = {...clone(defaultSettings), ...state.settings};
+  delete state.settings.relationsFileId;
+  delete state.settings.documentFields;
+  priceMeta = value.priceMeta || {};
+  metalPrices = value.metalPrices ? validateMetalPrices(value.metalPrices) : null;
+  metalPriceMeta = value.metalPriceMeta || {source: 'unconfigured'};
 }
 function activateVariant(id) {
   remember();
   state.selectedVariantId = id;
   const context = currentVariant().context;
   if (context) {
-    config = validateConfig(context.config); relations = normalizeRelations(context.relations);
-    relationMeta = clone(context.relationMeta || {}); priceMeta = clone(context.priceMeta || {});
+    config = validateConfig(context.config);
+    priceMeta = clone(context.priceMeta || {});
+    metalPrices = context.metalPrices ? validateMetalPrices(context.metalPrices) : null;
+    metalPriceMeta = clone(context.metalPriceMeta || {source: 'unconfigured'});
     state.settings.formulaMode = config.formulaMode; state.settings.rounding = config.rounding;
   }
   render();
 }
 function formulaText() {
   return config.formulaMode === 'excel'
-    ? 'Цена = (базовая цена + крепёж + доп. покрытие + доставка) × К1 × К2. Вес исключён.'
-    : 'Цена = базовая цена × коэффициент покрытия × К1 × К2.';
+    ? 'Сумма = (цена за кг × вес × К1 × К2 × К3 + метизы) × количество.'
+    : 'Цена = базовая цена × К1 × К2 × К3. Покрытие — название для КП.';
 }
 function renderVariants() {
   $('variantSelect').replaceChildren(...state.variants.map(v => option(v.id, v.name)));
@@ -104,9 +131,35 @@ function renderVariants() {
   $('companyName').value = draft().companyName || '';
   $('shipmentDate').value = draft().shipmentDate || '';
 }
-function drawOptions(row) {
-  if (!row.productId) return [];
-  return resolveRelations(row.productId, relations).drawings;
+function renderTerms() {
+  draft().documentFields ||= clone(defaultDocumentFields);
+  for (const key of documentFieldNames) $(key).value = draft().documentFields[key] || '';
+  $('paymentTermsPreset').value = Object.keys(paymentPresets).find(key => paymentPresets[key] === draft().documentFields.YuzmPaymentTerms) || '';
+}
+function withoutRetiredFields(rows) {
+  return rows.map(row => {
+    const clean = {...row};
+    for (const field of ['drawingId', 'coatingFactor', 'extraCoating', 'delivery']) delete clean[field];
+    return clean;
+  });
+}
+function migrateRows(rows, rawConfig, prices = null) {
+  return withoutRetiredFields(rows).map(row => {
+    if (row.k3 === undefined) {
+      const legacyFactor = rawConfig?.calculationVersion !== 2 && rawConfig?.formulaMode !== 'excel'
+        ? rawConfig?.coatings?.find(c => c.code === row.coatingCode)?.coefficient : undefined;
+      row.k3 = legacyFactor === undefined ? '1' : String(legacyFactor);
+    }
+    row.pricePerKg ??= prices?.prices_per_kg?.[row.productId] === undefined ? '' : String(prices.prices_per_kg[row.productId]);
+    row.weight ??= '';
+    row.fasteners ??= '0';
+    row.executionTerm ??= '';
+    return row;
+  });
+}
+function metalPriceFor(productId) {
+  return metalPrices?.currency === config.currency && metalPrices.prices_per_kg[productId] !== undefined
+    ? String(metalPrices.prices_per_kg[productId]) : '';
 }
 function renderRows() {
   const nodes = draft().rows.map(row => {
@@ -115,14 +168,6 @@ function renderRows() {
     const productSelect = select(nameOptions, String(row.productId), {'data-field': 'productId', 'aria-label': 'Товар позиции'});
     const baseText = element('span', {class: 'base-price', text: formatMoney(row.basePrice, row.currency || config.currency)});
     const searchButton = element('button', {type: 'button', class: 'row-search', 'data-action': 'choose-product', text: 'Выбрать из каталога', 'aria-label': 'Найти товар в каталоге'});
-    const draws = drawOptions(row);
-    const drawSelect = select(
-      [{value: '', text: draws.length ? 'Выберите чертёж' : 'Связь не задана'}, ...draws.map(d => ({value: d.id, text: d.name}))],
-      row.drawingId || '',
-      {'data-field': 'drawingId', 'aria-label': 'Чертёж позиции'}
-    );
-    const found = draws.find(d => d.id === row.drawingId);
-    const kitText = found ? found.kits.map(k => k.name).join('; ') : (draws.length > 1 ? 'Несколько чертежей — выберите вариант' : 'Нет выбранного комплекта КД');
     const node = element('div', {class: 'item-row', 'data-row-id': row.id}, [
       cell('item-name', [
         productSelect,
@@ -131,15 +176,16 @@ function renderRows() {
       ]),
       cell('item-coating', [
         select(config.coatings.map(c => ({value: c.code, text: c.name})), row.coatingCode, {'data-field': 'coatingCode', 'aria-label': 'Покрытие позиции'}),
-        element('div', {class: 'hint coating-factor', 'data-factor': row.id})
+        element('div', {class: 'hint', text: 'Наименование для КП'})
       ]),
       cell('item-quantity', [input(row.quantity, 'quantity', 'Количество позиции', {inputmode: 'decimal'})]),
-      cell('item-coefficients', [element('div', {class: 'coef-grid'}, [
+      cell('item-coefficients', [element('div', {class: 'coef-grid coeffs-three'}, [
         element('label', {class: 'mini-label', text: 'КП-1'}, [input(row.k1, 'k1', 'Коэффициент КП-1', {inputmode: 'decimal'})]),
         element('span', {class: 'coef-times', text: '×'}),
-        element('label', {class: 'mini-label', text: 'КП-2'}, [input(row.k2, 'k2', 'Коэффициент КП-2', {inputmode: 'decimal'})])
+        element('label', {class: 'mini-label', text: 'КП-2'}, [input(row.k2, 'k2', 'Коэффициент КП-2', {inputmode: 'decimal'})]),
+        element('label', {class: 'mini-label', text: 'К3 · покраска'}, [input(row.k3, 'k3', 'Коэффициент покраски и покрытия', {inputmode: 'decimal'})])
       ])]),
-      cell('item-drawing', [drawSelect, element('div', {class: 'hint', text: kitText})]),
+      cell('item-execution', [input(row.executionTerm || '', 'executionTerm', 'Срок исполнения позиции', {placeholder: '15 рабочих дней', maxlength: '250'})]),
       cell('item-conditions', [element('label', {class: 'check-label'}, [
         input('', 'nonstandard', 'Нестандартная позиция', {type: 'checkbox', checked: row.nonstandard}),
         element('span', {text: 'Нестандарт'})
@@ -148,9 +194,9 @@ function renderRows() {
       element('div', {class: 'item-summary', 'data-summary': row.id})
     ]);
     if (config.formulaMode === 'excel') {
-      node.append(element('div', {class: 'item-extras'}, ['fasteners', 'extraCoating', 'delivery'].map((key, index) =>
-        element('label', {class: 'mini-label', text: ['Крепёж / покупные, ₽ за ед.', 'Доп. покрытие, ₽ за ед.', 'Доставка, ₽ за ед.'][index]}, [
-          input(row[key] ?? '0', key, ['Крепёж', 'Дополнительное покрытие', 'Доставка'][index], {inputmode: 'decimal'})
+      node.append(element('div', {class: 'item-extras'}, ['pricePerKg', 'weight', 'fasteners'].map((key, index) =>
+        element('label', {class: 'mini-label', text: ['Цена металла, ₽/кг · из файла', 'Вес одного изделия, кг', 'Метизы, ₽ за изделие'][index]}, [
+          input(row[key] ?? '', key, ['Цена металла за кг', 'Вес одного изделия', 'Цена метизов'][index], {inputmode: 'decimal', ...(key === 'pricePerKg' ? {readonly: 'readonly', placeholder: 'Загрузите цену из файла'} : {})})
         ])
       )));
     }
@@ -172,82 +218,196 @@ function recalc() {
         : row.errors.join(' · ');
       summary.classList.toggle('invalid', !row.valid);
     }
-    const factor = [...document.querySelectorAll('[data-factor]')].find(n => n.dataset.factor === row.id);
-    if (factor) factor.textContent = config.formulaMode === 'excel' ? 'Доплата задаётся суммой ниже' : '× ' + (row.coatingFactor ?? '—');
+
   }
   $('saveBtn').disabled = busy || !calculation.valid;
   $('createQuoteBtn').disabled = !calculation.valid;
   $('applyDealBtn').disabled = !connected || !calculation.valid || busy;
+  for (const id of ['variantSelect', 'newVariantBtn', 'duplicateVariantBtn', 'connectDealBtn', 'resetDemoBtn']) $(id).disabled = busy;
+  renderDocumentControls();
   remember();
 }
-function selectedDocuments(rows = draft().rows, sourceRelations = relations) {
-  const files = new Map();
-  for (const row of rows) {
-    if (!row.productId) continue;
-    const drawing = resolveRelations(row.productId, sourceRelations).drawings.find(d => d.id === row.drawingId);
-    if (!drawing) continue;
-    if (drawing.fileId) files.set(String(drawing.fileId), {id: drawing.fileId, name: drawing.name, type: 'Чертёж', product: row.productName});
-    for (const kit of drawing.kits) {
-      for (const file of kit.files) files.set(String(file.id), {id: file.id, name: file.name, type: kit.name, product: row.productName});
-    }
-  }
-  return [...files.values()];
-}
 function renderDocuments() {
-  const docs = selectedDocuments();
-  $('docsBody').replaceChildren(...docs.map(file =>
+  $('docsBody').replaceChildren(...currentVariant().versions.map(snapshot =>
     element('div', {class: 'document-row'}, [
       element('span', {class: 'file-icon', text: '▤', 'aria-hidden': 'true'}),
       element('div', {class: 'document-info'}, [
-        element('strong', {text: file.name}),
-        element('div', {class: 'hint', text: file.type + ' · ' + file.product})
+        element('strong', {text: snapshot.variantName + ' · версия ' + snapshot.version}),
+        element('div', {class: 'hint', text: formatMoney(snapshot.total, snapshot.currency)})
       ]),
-      element('span', {class: 'document-state', text: relationMeta.source === 'demo' ? 'Пример' : 'Связан'}),
-      element('button', {type: 'button', class: 'text-button', 'data-file-id': file.id, text: 'Открыть →'})
+      element('span', {class: 'document-state', text: snapshot.storage === 'disk' ? 'Диск Bitrix24' : 'Этот браузер'}),
+      element('button', {type: 'button', class: 'text-button', 'data-view-document': snapshot.snapshotId, text: 'Просмотреть →'})
     ])
   ));
-  if (!docs.length) $('docsBody').append(element('p', {class: 'empty-state', text: 'Выберите чертёж позиции — связанные файлы появятся здесь.'}));
+  for (const record of currentVariant().documents || []) {
+    $('docsBody').append(element('div', {class: 'document-row'}, [
+      element('span', {class: 'file-icon', text: '▤', 'aria-hidden': 'true'}),
+      element('div', {class: 'document-info'}, [
+        element('strong', {text: record.title || 'Документ КП #' + record.id}),
+        element('div', {class: 'hint', text: 'Шаблон #' + record.templateId})
+      ]),
+      ...documentLinks(record)
+    ]));
+  }
+  if (!currentVariant().versions.length) $('docsBody').append(element('p', {class: 'empty-state', text: 'Сохраните версию КП, чтобы открыть её здесь.'}));
 }
-function renderRelations() {
-  const count = relations.product_drawings.length;
-  $('relationsSummary').textContent = count + ' связей товаров · версия ' + (relations.version || 'без версии') + (relationMeta.source === 'demo' ? ' · демонстрация' : '');
-  $('relationsBody').replaceChildren(...relations.product_drawings.map(link => {
-    const drawing = resolveRelations(link.product_id, relations).drawings.find(d => d.id === link.drawing_id);
-    return element('div', {class: 'relation-row'}, [
-      element('strong', {text: (link.product_name || 'Товар #' + link.product_id)}),
-      element('span', {text: '→ ' + (drawing?.name || link.drawing_id)}),
-      element('span', {class: 'hint', text: '→ ' + (drawing?.kits.map(k => k.name).join(', ') || 'Комплект КД не задан')})
-    ]);
-  }));
+function selectedTemplateId() {
+  return draft().documentTemplateId || state.settings.defaultDocumentTemplateId || '';
+}
+function renderTemplates() {
+  const selected = selectedTemplateId();
+  const options = [option('', connected ? 'Выберите зарегистрированный шаблон' : 'Подключите сделку Битрикс24')];
+  if (selected && !templates.some(t => String(t.id) === selected)) options.push(option(selected, 'Шаблон #' + selected + ' · обновите список'));
+  options.push(...templates.map(t => option(String(t.id), t.name + ' · #' + t.id)));
+  $('documentTemplateId').replaceChildren(...options);
+  $('documentTemplateId').value = selected;
+  $('documentTemplateId').disabled = !connected || !state.activeDealId;
+  $('refreshTemplatesBtn').disabled = !connected || !state.activeDealId || busy;
+  $('templatesHint').textContent = !connected ? 'Шаблоны загружаются из генератора документов Битрикс24 после подключения сделки.'
+    : templatesLoaded ? (templates.length ? 'Шаблон выбирается для текущего варианта КП. Покрытие и срок передаются в поля вашего DOCX.' : 'Для этой сделки нет доступных активных шаблонов.')
+      : 'Обновите список шаблонов для этой сделки.';
+  renderDocumentControls();
+}
+async function refreshTemplates() {
+  if (!connected || !state.activeDealId) return;
+  $('refreshTemplatesBtn').disabled = true;
+  $('templatesHint').textContent = 'Загружаю зарегистрированные шаблоны…';
+  try {
+    templates = await adapter.listDocumentTemplates(state.activeDealId);
+    templatesLoaded = true;
+    renderTemplates();
+  } catch (error) {
+    templates = []; templatesLoaded = false;
+    renderTemplates();
+    $('templatesHint').textContent = safeError(error);
+  } finally { $('refreshTemplatesBtn').disabled = busy; }
+}
+function previewSnapshot() {
+  return currentVariant().versions.find(s => s.snapshotId === $('quoteDialog').dataset.snapshotId);
+}
+function previewTemplateId(snapshot = previewSnapshot()) {
+  return snapshot?.documentTemplateId || selectedTemplateId();
+}
+function previewDocument(snapshot = previewSnapshot()) {
+  return (currentVariant().documents || []).findLast(record => record.snapshotId === snapshot?.snapshotId && String(record.templateId) === previewTemplateId(snapshot));
+}
+function documentLinks(record) {
+  const links = [];
+  for (const [key, label] of [['downloadUrl', 'Скачать DOCX'], ['pdfUrl', 'Скачать PDF'], ['publicUrl', 'Открыть документ']]) {
+    if (!record[key]) continue;
+    try {
+      const url = new URL(record[key]);
+      if (['http:', 'https:'].includes(url.protocol)) links.push(element('a', {href: url.href, target: '_blank', rel: 'noopener noreferrer', class: 'button secondary small', text: label}));
+    } catch { /* Invalid links are not rendered. */ }
+  }
+  return links;
+}
+function renderDocumentControls() {
+  const snapshot = previewSnapshot(), record = previewDocument(snapshot);
+  const canCreate = connected && state.scope !== 'demo' && snapshot && String(snapshot.dealId) === String(state.activeDealId) && previewTemplateId(snapshot);
+  $('generateDocumentBtn').disabled = busy || !canCreate || Boolean(record);
+  $('refreshDocumentBtn').disabled = busy || !record || !connected;
+  $('documentResult').hidden = !snapshot;
+  $('documentResult').replaceChildren();
+  if (record) {
+    $('documentResult').append(element('p', {text: 'Документ #' + record.id + (record.conversionError ? ' создан, но Битрикс24 сообщил об ошибке преобразования PDF.' : record.pdfUrl ? ' готов.' : ' создан. PDF ещё формируется — обновите его готовность.')}), ...documentLinks(record));
+  } else if (snapshot) {
+    $('documentResult').textContent = canCreate ? 'Документ будет создан из этой сохранённой версии по шаблону #' + previewTemplateId(snapshot) + '.'
+      : 'Для генерации документа подключите сделку и выберите зарегистрированный шаблон.';
+  }
+}
+async function generateDocument() {
+  if (busy) return;
+  const snapshot = previewSnapshot(), templateId = previewTemplateId(snapshot), variant = currentVariant();
+  try {
+    if (!snapshot || !templateId || !connected || state.scope === 'demo') throw new Error('Подключите сделку и выберите шаблон КП.');
+    if (previewDocument(snapshot)) return;
+    busy = true; recalc();
+    status('Создаю документ из выбранной версии КП…');
+    const result = await adapter.createQuoteDocument(state.activeDealId, templateId, snapshot);
+    variant.documents ||= [];
+    variant.documents.push({...result, templateId, snapshotId: snapshot.snapshotId, createdAt: new Date().toISOString()});
+    remember(); renderDocuments();
+    status('Документ #' + result.id + ' создан в Битрикс24.' + (result.pdfUrl ? ' PDF готов.' : ' PDF можно получить кнопкой «Обновить PDF».'), 'success');
+  } catch (error) {
+    if (error.documentId && snapshot) {
+      variant.documents ||= [];
+      variant.documents.push({id: String(error.documentId), title: 'Документ #' + error.documentId, templateId, snapshotId: snapshot.snapshotId, createdAt: new Date().toISOString()});
+      remember(); renderDocuments();
+      status('Битрикс24 создал документ #' + error.documentId + ', но его данные не удалось подтвердить. Нажмите «Обновить PDF» для повторного чтения документа.', 'error');
+    } else status(safeError(error), 'error');
+  }
+  finally { busy = false; recalc(); }
+}
+async function refreshDocument() {
+  if (busy) return;
+  const record = previewDocument();
+  if (!record) return;
+  try {
+    busy = true; recalc();
+    const result = await adapter.getQuoteDocument(record.id);
+    Object.assign(record, result);
+    remember(); renderDocuments();
+    status(result.conversionError ? 'Битрикс24 сообщил об ошибке преобразования PDF документа #' + result.id + '.' : result.pdfUrl ? 'PDF документа #' + result.id + ' готов.' : 'PDF ещё формируется. Документ уже создан; повторите обновление позже.', result.conversionError ? 'error' : result.pdfUrl ? 'success' : 'info');
+  } catch (error) { status(safeError(error), 'error'); }
+  finally { busy = false; recalc(); }
+}
+function renderMetalPricesSummary() {
+  $('metalPricesSummary').textContent = !metalPrices ? 'Справочник цен металла не загружен.'
+    : Object.keys(metalPrices.prices_per_kg).length + ' цен · ' + metalPrices.currency + ' · версия ' + metalPrices.version
+      + (metalPriceMeta.source === 'demo' ? ' · демонстрация' : metalPriceMeta.fileId ? ' · файл #' + metalPriceMeta.fileId : ' · ' + (metalPriceMeta.name || 'локальный файл'));
+}
+function applyMetalPrices(raw, metadata) {
+  const next = validateMetalPrices(raw);
+  if (next.currency !== config.currency) throw new Error('Валюта цен металла должна совпадать с валютой КП.');
+  metalPrices = next; metalPriceMeta = metadata;
+  for (const row of draft().rows) row.pricePerKg = metalPriceFor(row.productId);
+}
+async function loadMetalPrices() {
+  try {
+    keepSettings();
+    if (!state.settings.metalPricesFileId) throw new Error('Укажите ID файла цен металла на Диске.');
+    const file = await adapter.loadDiskJson(state.settings.metalPricesFileId);
+    applyMetalPrices(file.data, {source: 'disk', fileId: file.fileId, version: file.version, name: file.name});
+    render(); settingsToForm();
+    settingsMessage('Цены металла загружены с Диска.');
+    status('Цены металла применены к текущему черновику. Сохранённые версии сохраняют прежние цены.', 'success');
+  } catch (error) { settingsMessage(safeError(error)); }
+}
+async function importMetalPrices(event) {
+  try {
+    const file = event.target.files?.[0]; if (!file) return;
+    if (file.size > 2 * 1024 * 1024) throw new Error('Размер JSON ограничен 2 МБ.');
+    applyMetalPrices(JSON.parse(await file.text()), {source: 'local-file', name: file.name});
+    render(); settingsToForm(); settingsMessage('Загружены цены металла из файла «' + file.name + '».');
+  } catch (error) { settingsMessage(safeError(error)); }
+  finally { event.target.value = ''; }
 }
 function render() {
   $('dealBadge').textContent = state.scope === 'demo' ? 'ПИЛОТ' : 'Сделка #' + state.activeDealId;
   $('connectionBadge').textContent = connected ? 'Bitrix24 подключён' : 'Демонстрационный режим';
   $('connectionBadge').classList.toggle('connected', connected);
-  renderVariants(); renderRows(); renderDocuments(); renderRelations();
+  renderVariants(); renderRows(); renderDocuments(); renderTemplates(); renderMetalPricesSummary(); renderTerms();
 }
 function ensureValid() {
   calculation = calculateQuote(draft().rows, config);
   if (!calculation.valid) throw new Error('Исправьте данные расчёта: ' + calculation.errors.join('; '));
   if (!draft().rows.length) throw new Error('Добавьте хотя бы одну позицию.');
   if (!String(draft().companyName || '').trim()) throw new Error('Укажите наименование компании.');
-  for (const row of draft().rows) {
-    const draws = drawOptions(row);
-    if (row.drawingId && !draws.some(d => d.id === row.drawingId)) throw new Error('Обновите чертёж для позиции «' + row.productName + '»: связь изменена.');
-    if (draws.length > 1 && !row.drawingId) throw new Error('Выберите чертёж для позиции «' + row.productName + '».');
-  }
+  if (draft().rows.some(row => typeof row.executionTerm !== 'string' || row.executionTerm.length > 250 || /[\u0000-\u001f\u007f]/.test(row.executionTerm))) throw new Error('Срок исполнения должен быть текстом длиной до 250 символов.');
 }
 function buildSnapshot() {
   ensureValid();
   const variant = currentVariant();
   const version = Math.max(0, ...variant.versions.map(v => Number(v.version) || 0)) + 1;
   return {
-    schemaVersion: 1, snapshotId: uid(), dealId: state.scope === 'demo' ? null : String(state.activeDealId),
+    schemaVersion: 2, snapshotId: uid(), dealId: state.scope === 'demo' ? null : String(state.activeDealId),
     variantId: variant.id, variantName: variant.name, version, createdAt: new Date().toISOString(),
     companyName: draft().companyName, shipmentDate: draft().shipmentDate, currency: config.currency,
-    rows: clone(calculation.rows), total: calculation.total, quantity: calculation.quantity,
-    config: clone(config), relations: clone(relations), relationMeta: clone(relationMeta), priceMeta: clone(priceMeta),
-    documents: selectedDocuments(), storage: 'local'
+    rows: withoutRetiredFields(clone(calculation.rows)), total: calculation.total, quantity: calculation.quantity,
+    config: clone(config), priceMeta: clone(priceMeta), metalPrices: clone(metalPrices), metalPriceMeta: clone(metalPriceMeta),
+    documentTemplateId: selectedTemplateId(), documentFields: clone(draft().documentFields || {}),
+    storage: 'local'
   };
 }
 async function saveVersion() {
@@ -276,7 +436,7 @@ async function saveVersion() {
       (snapshot.storage === 'disk' ? ' на Диске Bitrix24.' : ' в этом браузере. Для общей истории укажите папку Диска в настройках.'), 'success');
     return snapshot;
   } catch (error) { status(safeError(error), 'error'); return null; }
-  finally { busy = false; recalc(); }
+  finally { busy = false; recalc(); renderDocuments(); }
 }
 function safeError(error) {
   return String(error?.message || error).replace(/https?:\/\/[^\s"'<>]+/g, '[адрес скрыт]');
@@ -302,13 +462,13 @@ function renderHistory() {
 }
 function showQuote(snapshot) {
   const table = element('table', {class: 'quote-table'});
-  table.append(element('thead', {}, [element('tr', {}, ['Наименование', 'Покрытие', 'Кол-во', 'Цена, ₽', 'Сумма, ₽'].map(x => element('th', {text: x})))]));
+  table.append(element('thead', {}, [element('tr', {}, ['Наименование', 'Покрытие', 'Кол-во', 'Цена, ₽', 'Сумма, ₽', 'Срок исполнения'].map(x => element('th', {text: x})))]));
   const tbody = element('tbody');
   for (const row of snapshot.rows) {
     const coating = snapshot.config.coatings.find(c => c.code === row.coatingCode);
     tbody.append(element('tr', {}, [
       row.productName, coating?.name || row.coatingCode, String(row.quantity),
-      formatMoney(row.unitPrice, snapshot.currency), formatMoney(row.lineTotal, snapshot.currency)
+      formatMoney(row.unitPrice, snapshot.currency), formatMoney(row.lineTotal, snapshot.currency), row.executionTerm || '—'
     ].map(text => element('td', {text}))));
   }
   table.append(tbody);
@@ -317,22 +477,26 @@ function showQuote(snapshot) {
     element('p', {text: snapshot.companyName}),
     element('p', {class: 'hint', text: snapshot.variantName + ' · версия ' + snapshot.version + ' · ' + new Date(snapshot.createdAt).toLocaleDateString('ru-RU', {timeZone: 'Europe/Moscow'})}),
     table,
-    element('p', {class: 'quote-total', text: 'Итого: ' + formatMoney(snapshot.total, snapshot.currency)}),
-    element('p', {class: 'hint', text: 'Пилотный расчёт. Коммерческие условия и трактовку НДС необходимо настроить перед рабочим применением.'})
+    element('p', {class: 'quote-total', text: 'Итого: ' + formatMoney(snapshot.total, snapshot.currency)})
   );
+  for (const key of documentFieldNames) {
+    if (snapshot.documentFields?.[key]) $('quotePreview').append(element('p', {text: (key === 'YuzmPaymentTerms' ? 'Условия оплаты: ' : '') + snapshot.documentFields[key]}));
+  }
   $('quoteDialog').dataset.snapshotId = snapshot.snapshotId;
+  renderDocumentControls();
   openDialog('quoteDialog');
 }
 function settingsToForm() {
   const s = state.settings;
-  for (const key of ['dealId', 'relationsFileId', 'pricesFileId', 'historyFolderId']) $(key === 'dealId' ? 'dealIdInput' : key).value = s[key] || '';
+  for (const key of ['dealId', 'pricesFileId', 'metalPricesFileId', 'historyFolderId', 'defaultDocumentTemplateId']) $(key === 'dealId' ? 'dealIdInput' : key).value = s[key] || '';
   $('formulaMode').value = config.formulaMode;
   $('roundingMode').value = config.rounding;
+  renderMetalPricesSummary();
   settingsMessage('');
 }
 function readSettingsForm() {
   const result = {...state.settings};
-  for (const key of ['dealId', 'relationsFileId', 'pricesFileId', 'historyFolderId']) {
+  for (const key of ['dealId', 'pricesFileId', 'metalPricesFileId', 'historyFolderId', 'defaultDocumentTemplateId']) {
     const value = $(key === 'dealId' ? 'dealIdInput' : key).value.trim();
     if (value && !/^[1-9]\d*$/.test(value)) throw new Error('ID сделки, файлов и папки должны быть положительными целыми числами.');
     result[key] = value;
@@ -345,16 +509,6 @@ function keepSettings() {
   config = validateConfig({...config, formulaMode: next.formulaMode, rounding: next.rounding});
   state.settings = next; remember();
 }
-function applyRelations(raw, metadata) {
-  const normalized = normalizeRelations(raw);
-  relations = normalized; relationMeta = metadata;
-  for (const variant of [currentVariant()]) {
-    for (const row of variant.draft.rows) {
-      const drawings = drawOptions(row);
-      if (!drawings.some(d => d.id === row.drawingId)) row.drawingId = drawings.length === 1 ? drawings[0].id : '';
-    }
-  }
-}
 function applyPrices(raw, metadata) {
   config = validateConfig({...raw, formulaMode: state.settings.formulaMode, rounding: state.settings.rounding});
   priceMeta = metadata;
@@ -365,46 +519,26 @@ async function loadRemote() {
   try {
     keepSettings();
     const s = state.settings;
-    if (!s.relationsFileId && !s.pricesFileId) throw new Error('Укажите ID файла связей или покрытий.');
-    const files = await Promise.all([
-      s.relationsFileId ? adapter.loadDiskJson(s.relationsFileId) : null,
-      s.pricesFileId ? adapter.loadDiskJson(s.pricesFileId) : null
-    ]);
-    // Validate both files before making any state changes.
-    if (files[0]) normalizeRelations(files[0].data);
-    if (files[1]) validateConfig(files[1].data);
-    if (files[0]) applyRelations(files[0].data, {source: 'disk', fileId: files[0].fileId, version: files[0].version});
-    if (files[1]) applyPrices(files[1].data, {source: 'disk', fileId: files[1].fileId, version: files[1].version});
+    if (!s.pricesFileId) throw new Error('Укажите ID файла покрытий.');
+    const file = await adapter.loadDiskJson(s.pricesFileId);
+    validateConfig(file.data);
+    applyPrices(file.data, {source: 'disk', fileId: file.fileId, version: file.version});
     render(); settingsToForm();
     settingsMessage('Справочники загружены и проверены.');
     status('Справочники с Диска применены к текущему черновику. Сохранённые версии не изменены.', 'success');
   } catch (error) { settingsMessage(safeError(error) + ' При ограничениях браузера загрузите скачанный JSON вручную.'); }
 }
-async function importFile(event, type) {
+async function importFile(event) {
   try {
     const file = event.target.files?.[0]; if (!file) return;
     if (file.size > 2 * 1024 * 1024) throw new Error('Для пилота размер JSON ограничен 2 МБ.');
     const json = JSON.parse(await file.text());
-    if (type === 'relations') applyRelations(json, {source: 'local-file', name: file.name});
-    else applyPrices(json, {source: 'local-file', name: file.name});
+    applyPrices(json, {source: 'local-file', name: file.name});
     render(); settingsToForm();
     settingsMessage('Загружен файл «' + file.name + '».');
     status('Справочник «' + file.name + '» загружен. Старые версии КП сохраняют прежние данные.', 'success');
   } catch (error) { settingsMessage(safeError(error)); }
   finally { event.target.value = ''; }
-}
-async function openDocument(id) {
-  try {
-    const example = relationMeta.source === 'demo' ? demoFile(id) : null;
-    if (example) { window.open(example, '_blank', 'noopener'); return; }
-    if (!connected) throw new Error('Для открытия файла Диска запустите приложение в Bitrix24.');
-    const file = await adapter.call('disk.file.get', {id: Number(id)});
-    const url = file.DETAIL_URL;
-    if (!url) throw new Error('Bitrix24 не вернул ссылку на документ.');
-    const parsed = new URL(url, window.location.href);
-    if (!['https:', 'http:'].includes(parsed.protocol)) throw new Error('Недопустимая ссылка на документ.');
-    window.open(parsed.href, '_blank', 'noopener');
-  } catch (error) { status(safeError(error), 'error'); }
 }
 async function searchProducts(query, target) {
   $(target).textContent = 'Поиск…';
@@ -426,11 +560,9 @@ function chooseProduct(product) {
   if (chosenRow) {
     const row = draft().rows.find(r => r.id === chosenRow);
     if (!row) throw new Error('Позиция уже удалена.');
-    Object.assign(row, {productId: String(product.id), productName: product.name, basePrice: product.basePrice, currency: product.currency, source: product.source, priceSource: 'catalog'});
-    const drawings = drawOptions(row); row.drawingId = drawings.length === 1 ? drawings[0].id : '';
+    Object.assign(row, {productId: String(product.id), productName: product.name, basePrice: product.basePrice, currency: product.currency, source: product.source, priceSource: 'catalog', pricePerKg: metalPriceFor(product.id), weight: ''});
   } else {
-    const row = newRow(product); const drawings = drawOptions(row);
-    row.drawingId = drawings.length === 1 ? drawings[0].id : ''; draft().rows.push(row);
+    const row = newRow(product); row.pricePerKg = metalPriceFor(product.id); draft().rows.push(row);
   }
   renderRows(); renderDocuments();
   if ($('productDialog').open) closeDialog('productDialog');
@@ -449,11 +581,10 @@ async function connectDeal(id) {
       ...newRow({id: String(row.productId || ''), name: row.productName, basePrice: row.price ?? row.unitPrice ?? 0, currency: deal.currency, source: 'deal'}),
       quantity: String(row.quantity), priceSource: 'deal', taxRate: row.taxRate ?? 0, taxIncluded: row.taxIncluded ?? 'Y'
     }));
-    const v = makeVariant('Основной вариант', {companyName: deal.companyName || deal.title, shipmentDate: '', rows, currency: deal.currency});
-    state = {schemaVersion: 1, scope, activeDealId: String(id), settings: savedSettings, variants: [v], selectedVariantId: v.id};
+    const v = makeVariant('Основной вариант', {...blankDraft(rows), companyName: deal.companyName || deal.title, currency: deal.currency});
+    state = {schemaVersion: 2, scope, activeDealId: String(id), settings: savedSettings, variants: [v], selectedVariantId: v.id};
     config = validateConfig({...config, currency: deal.currency});
-    // Demo IDs and documents must never be used as real portal bindings.
-    if (relationMeta.source === 'demo') { relations = normalizeRelations({version: 'empty', product_drawings: [], drawing_kd: []}); relationMeta = {source: 'unconfigured'}; }
+    metalPrices = null; metalPriceMeta = {source: 'unconfigured'};
   }
   state.activeDealId = String(id);
   state.settings = {...state.settings, ...savedSettings};
@@ -462,19 +593,21 @@ async function connectDeal(id) {
     try {
       const snapshots = await adapter.loadHistory(state.settings.historyFolderId, id);
       for (const snapshot of snapshots) {
-        if (snapshot.schemaVersion !== 1 || !snapshot.snapshotId || !snapshot.variantId || !Array.isArray(snapshot.rows)) continue;
-        validateConfig(snapshot.config); normalizeRelations(snapshot.relations);
+        if (![1, 2].includes(snapshot.schemaVersion) || !snapshot.snapshotId || !snapshot.variantId || !Array.isArray(snapshot.rows)) continue;
+        validateConfig(snapshot.config);
         let v = state.variants.find(v => v.id === snapshot.variantId);
         if (!v) {
-          v = {id: snapshot.variantId, name: snapshot.variantName || 'Вариант', draft: {companyName: snapshot.companyName, shipmentDate: snapshot.shipmentDate, rows: clone(snapshot.rows), currency: snapshot.currency}, versions: [],
-            context: {config: clone(snapshot.config), relations: clone(snapshot.relations), relationMeta: clone(snapshot.relationMeta || {}), priceMeta: clone(snapshot.priceMeta || {})}};
+          v = {id: snapshot.variantId, name: snapshot.variantName || 'Вариант', draft: {companyName: snapshot.companyName, shipmentDate: snapshot.shipmentDate, rows: migrateRows(clone(snapshot.rows), snapshot.config, snapshot.metalPrices), currency: snapshot.currency, documentTemplateId: snapshot.documentTemplateId || '', documentFields: {...clone(defaultDocumentFields), ...snapshot.documentFields}}, versions: [], documents: [],
+            context: {config: clone(snapshot.config), priceMeta: clone(snapshot.priceMeta || {}), metalPrices: clone(snapshot.metalPrices || null), metalPriceMeta: clone(snapshot.metalPriceMeta || {source: 'unconfigured'})}};
           state.variants.push(v);
         }
         if (!v.versions.some(x => x.snapshotId === snapshot.snapshotId)) v.versions.push({...snapshot, storage: 'disk'});
       }
     } catch (error) { status('Сделка загружена, общая история недоступна: ' + safeError(error), 'error'); render(); return; }
   }
+  templates = []; templatesLoaded = false;
   render(); settingsToForm();
+  await refreshTemplates();
   status('Сделка #' + id + ' загружена. Существующие строки используют цену сделки; для базовой цены выберите товар из каталога.', 'success');
 }
 async function applyToDeal() {
@@ -503,11 +636,27 @@ async function applyToDeal() {
   finally { busy = false; recalc(); }
 }
 function bindEvents() {
+  for (const key of documentFieldNames) $(key).addEventListener('input', e => {
+    draft().documentFields[key] = e.target.value;
+    if (key === 'YuzmPaymentTerms') $('paymentTermsPreset').value = Object.keys(paymentPresets).find(k => paymentPresets[k] === e.target.value) || '';
+    remember();
+  });
+  $('paymentTermsPreset').addEventListener('change', e => {
+    if (paymentPresets[e.target.value]) { draft().documentFields.YuzmPaymentTerms = paymentPresets[e.target.value]; renderTerms(); remember(); }
+  });
+  document.querySelectorAll('[data-term-preset]').forEach(button => button.addEventListener('click', () => {
+    const key = button.dataset.termPreset;
+    if (defaultDocumentFields[key]) { draft().documentFields[key] = defaultDocumentFields[key]; renderTerms(); remember(); }
+  }));
   $('companyName').addEventListener('input', e => { draft().companyName = e.target.value; remember(); });
   $('shipmentDate').addEventListener('input', e => { draft().shipmentDate = e.target.value; remember(); });
   $('variantName').addEventListener('input', e => { currentVariant().name = e.target.value.trim() || 'Без названия'; remember(); });
   $('variantName').addEventListener('change', renderVariants);
   $('variantSelect').addEventListener('change', e => activateVariant(e.target.value));
+  $('documentTemplateId').addEventListener('change', e => { draft().documentTemplateId = e.target.value; remember(); renderDocumentControls(); });
+  $('refreshTemplatesBtn').addEventListener('click', refreshTemplates);
+  $('generateDocumentBtn').addEventListener('click', generateDocument);
+  $('refreshDocumentBtn').addEventListener('click', refreshDocument);
   $('newVariantBtn').addEventListener('click', () => {
     const v = makeVariant('Вариант ' + (state.variants.length + 1), {...blankDraft([]), companyName: draft().companyName, currency: config.currency});
     state.variants.push(v); state.selectedVariantId = v.id; render();
@@ -529,9 +678,8 @@ function bindEvents() {
     const row = draft().rows.find(r => r.id === e.target.closest('[data-row-id]')?.dataset.rowId); if (!row) return;
     if (field === 'productId') {
       const product = catalogProducts.find(p => String(p.id) === e.target.value); if (!product) return;
-      Object.assign(row, {productId: String(product.id), productName: product.name, basePrice: product.basePrice, currency: product.currency, source: product.source || 'catalog'});
-      const drawings = drawOptions(row); row.drawingId = drawings.length === 1 ? drawings[0].id : '';
-    } else row[field] = e.target.value;
+      Object.assign(row, {productId: String(product.id), productName: product.name, basePrice: product.basePrice, currency: product.currency, source: product.source || 'catalog', pricePerKg: metalPriceFor(product.id), weight: ''});
+      } else row[field] = e.target.value;
     renderRows(); renderDocuments();
   });
   $('itemsBody').addEventListener('click', e => {
@@ -561,9 +709,13 @@ function bindEvents() {
     const snapshot = currentVariant().versions.find(s => s.snapshotId === (view || restoreId)); if (!snapshot) return;
     if (view) { closeDialog('historyDialog'); showQuote(snapshot); }
     else {
-      currentVariant().draft = {companyName: snapshot.companyName, shipmentDate: snapshot.shipmentDate, currency: snapshot.currency, rows: clone(snapshot.rows)};
-      config = validateConfig(snapshot.config); relations = normalizeRelations(snapshot.relations);
-      relationMeta = clone(snapshot.relationMeta || {}); priceMeta = clone(snapshot.priceMeta || {});
+      currentVariant().draft = {companyName: snapshot.companyName, shipmentDate: snapshot.shipmentDate, currency: snapshot.currency, rows: migrateRows(clone(snapshot.rows), snapshot.config, snapshot.metalPrices)};
+      config = validateConfig(snapshot.config);
+      priceMeta = clone(snapshot.priceMeta || {});
+      metalPrices = snapshot.metalPrices ? validateMetalPrices(snapshot.metalPrices) : null;
+      metalPriceMeta = clone(snapshot.metalPriceMeta || {source: 'unconfigured'});
+      currentVariant().draft.documentTemplateId = snapshot.documentTemplateId || '';
+      currentVariant().draft.documentFields = {...clone(defaultDocumentFields), ...snapshot.documentFields};
       state.settings.formulaMode = config.formulaMode; state.settings.rounding = config.rounding;
       closeDialog('historyDialog'); render(); status('Версия ' + snapshot.version + ' скопирована в черновик. История сохранена.', 'success');
     }
@@ -575,8 +727,9 @@ function bindEvents() {
     catch (error) { settingsMessage(safeError(error)); }
   });
   $('loadRemoteBtn').addEventListener('click', loadRemote);
-  $('localRelationsInput').addEventListener('change', e => importFile(e, 'relations'));
-  $('localPricesInput').addEventListener('change', e => importFile(e, 'prices'));
+  $('loadMetalPricesBtn').addEventListener('click', loadMetalPrices);
+  $('localMetalPricesInput').addEventListener('change', importMetalPrices);
+  $('localPricesInput').addEventListener('change', importFile);
   $('registerPlacementBtn').addEventListener('click', async () => {
     try { await adapter.registerPlacement('Конструктор КП'); settingsMessage('Вкладка зарегистрирована. Перезагрузите карточку сделки.'); }
     catch (error) { settingsMessage(safeError(error)); }
@@ -588,24 +741,27 @@ function bindEvents() {
   $('resetDemoBtn').addEventListener('click', async () => {
     if (!window.confirm('Открыть новый демонстрационный черновик? Сохранённые данные сделки останутся в браузере.')) return;
     state = freshState(); config = validateConfig(await (await fetch('data/coatings.example.json')).json());
-    relations = normalizeRelations(await (await fetch('data/relations.example.json')).json());
-    relationMeta = {source: 'demo'}; priceMeta = {source: 'demo'}; catalogProducts = clone(demoProducts);
+    metalPrices = validateMetalPrices(await (await fetch('data/metal-prices.example.json')).json());
+    metalPriceMeta = {source: 'demo'}; priceMeta = {source: 'demo'}; catalogProducts = clone(demoProducts);
     closeDialog('settingsDialog'); render(); status('Открыты демонстрационные данные. Запись в реальную сделку заблокирована.', 'info');
   });
-  $('toggleRelationsBtn').addEventListener('click', () => {
-    $('relationsBody').hidden = !$('relationsBody').hidden;
-    $('toggleRelationsBtn').setAttribute('aria-expanded', String(!$('relationsBody').hidden));
+  $('docsBody').addEventListener('click', e => {
+    const id = e.target.closest('[data-view-document]')?.dataset.viewDocument;
+    const snapshot = currentVariant().versions.find(version => version.snapshotId === id);
+    if (snapshot) showQuote(snapshot);
   });
-  $('docsBody').addEventListener('click', e => { const id = e.target.closest('[data-file-id]')?.dataset.fileId; if (id) openDocument(id); });
   for (const name of ['Settings', 'History', 'Product', 'Quote']) $('close' + name + 'Btn').addEventListener('click', () => closeDialog(name.toLowerCase() + 'Dialog'));
   $('printBtn').addEventListener('click', () => window.print());
 }
 async function boot() {
   try {
-    const [prices, links] = await Promise.all([fetch('data/coatings.example.json').then(r => r.json()), fetch('data/relations.example.json').then(r => r.json())]);
-    config = validateConfig(prices); relations = normalizeRelations(links); state = freshState();
+    const prices = await fetch('data/coatings.example.json').then(r => r.json());
+    config = validateConfig(prices);
+    metalPrices = validateMetalPrices(await fetch('data/metal-prices.example.json').then(r => r.json()));
+    state = freshState();
     const stored = readStored('demo'); if (stored) restore(stored);
     try { const settings = JSON.parse(localStorage.getItem(STORE + '-settings')); if (settings) state.settings = {...state.settings, ...settings}; } catch {}
+    delete state.settings.documentFields; delete state.settings.relationsFileId;
     bindEvents(); render();
     const connection = await adapter.init();
     connected = connection.connected;
@@ -614,6 +770,7 @@ async function boot() {
       const dealId = connection.dealId || state.settings.dealId;
       if (dealId) try { await connectDeal(String(dealId)); } catch (error) { status(safeError(error), 'error'); }
       else status('Bitrix24 подключён. Откройте вкладку сделки или укажите её ID в настройках.');
+      renderTemplates();
     }
   } catch (error) {
     status('Не удалось запустить калькулятор: ' + safeError(error) + '. Запускайте приложение через HTTP-сервер, а не двойным кликом по HTML.', 'error');

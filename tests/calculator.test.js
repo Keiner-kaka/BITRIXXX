@@ -1,25 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseNumber, formatMoney, validateConfig, normalizeRelations, resolveRelations, calculateQuote } from '../src/calculator.js';
+import {readFileSync} from 'node:fs';
+import { parseNumber, formatMoney, validateConfig, validateMetalPrices, calculateQuote } from '../src/calculator.js';
 
 const config = {
   version: 'pilot', currency: 'RUB', formulaMode: 'catalog', rounding: 'line',
-  coatings: [{ code: 'none', name: 'Без покрытия', coefficient: 1 }, { code: 'zinc', name: 'Цинк', coefficient: 1.18 }, { code: 'paint', name: 'Краска', coefficient: 1.12 }],
+  coatings: [{ code: 'none', name: 'Без покрытия' }, { code: 'zinc', name: 'Цинк' }, { code: 'paint', name: 'Краска' }],
 };
-const row = (overrides = {}) => ({ id: 'row-1', productId: '101', productName: 'Опора', basePrice: 38600, currency: 'RUB', quantity: 24, coatingCode: 'zinc', k1: '1,12', k2: '1,08', ...overrides });
-const relations = () => ({
-  version: 'pilot',
-  product_drawings: [
-    { product_id: 101, drawing_id: 'd1', drawing_name: 'Чертёж 1', drawing_file_id: 701 },
-    { product_id: '101', drawing_id: 'd2', drawing_name: 'Чертёж 2' },
-    { product_id: 102, drawing_id: 'd1' },
-  ],
-  drawing_kd: [
-    { drawing_id: 'd1', kit_id: 'kit1', kit_name: 'Комплект', file_id: 801, file_name: 'Сборка.pdf' },
-    { drawing_id: 'd1', kit_id: 'kit1', file_id: 802, file_name: 'Детали.pdf' },
-    { drawing_id: 'd2', kit_id: 'kit2', kit_name: 'Другой комплект' },
-  ],
-});
+const row = (overrides = {}) => ({ id: 'row-1', productId: '101', productName: 'Опора', basePrice: 38600, currency: 'RUB', quantity: 24, coatingCode: 'zinc', k1: '1,12', k2: '1,08', k3: '1,18', ...overrides });
+const excelConfig = {...config, formulaMode: 'excel'};
+const excelRow = (overrides = {}) => row({pricePerKg: 20, weight: 5, quantity: 2, k1: 2, k2: 1.5, k3: 1.2, fasteners: 10, ...overrides});
 
 test('Russian decimal input is finite and blank input is never zero', () => {
   assert.equal(parseNumber('38 600,25'), 38600.25);
@@ -30,24 +20,57 @@ test('Russian decimal input is finite and blank input is never zero', () => {
   assert.match(formatMoney(123.45), /123,45/);
 });
 
-test('legacy coefficient file imports without using kilogram prices', () => {
+test('legacy coating config imports labels while discarding old coefficients and kilogram prices', () => {
   const normalized = validateConfig({ version: 'test-1', currency: 'RUB', prices_per_kg: { 16: 120 }, coatings: [{ code: 'zinc', name: 'Цинк', coefficient: '1,15' }] });
   assert.equal(normalized.formulaMode, 'catalog');
   assert.equal(normalized.rounding, 'line');
-  assert.equal(normalized.coatings[0].coefficient, 1.15);
+  assert.deepEqual(normalized.coatings, [{code: 'zinc', name: 'Цинк'}]);
+  assert.equal(normalized.calculationVersion, 2);
   assert.equal('prices_per_kg' in normalized, false);
+  assert.deepEqual(validateConfig({...config, coatings: [{code: 'none'}]}).coatings, [{code: 'none', name: 'none'}]);
 });
 
-test('configuration rejects duplicates, invalid factors and unsupported choices', () => {
+test('configuration rejects duplicate coatings and unsupported choices', () => {
   assert.throws(() => validateConfig({ ...config, coatings: [config.coatings[0], config.coatings[0]] }), /Повторный/);
-  assert.throws(() => validateConfig({ ...config, coatings: [{ code: 'bad', coefficient: -1 }] }), /коэффициент/);
+  assert.throws(() => validateConfig({ ...config, coatings: [{code: 'x', name: {}}] }), /Название покрытия/);
   assert.throws(() => validateConfig({ ...config, currency: 'ZZZ' }), /валюта/);
   assert.throws(() => validateConfig({ ...config, rounding: 'floor' }), /округления/);
   assert.throws(() => validateConfig({ ...config, formulaMode: 'weight' }), /формула/);
 });
 
-test('screenshot calculation and rounded unit versus rounded line differ explicitly', () => {
-  const rows = [row(), row({ id: 'row-2', quantity: 12, coatingCode: 'paint', k1: '1,15', k2: '1,05' })];
+test('metal price file imports existing per-product values independently of coating properties', () => {
+  const original = JSON.parse(readFileSync(new URL('../data/prices.original.example.json', import.meta.url), 'utf8'));
+  const before = JSON.stringify(original);
+  const normalized = validateMetalPrices(original);
+  assert.deepEqual(normalized, {version: 'test-1', currency: 'RUB', prices_per_kg: {'16': 120}});
+  assert.equal(JSON.stringify(original), before);
+  assert.deepEqual(validateMetalPrices({prices_per_kg: {'0016': '120,25', '17': 0}}),
+    {version: '1', currency: 'RUB', prices_per_kg: {'16': 120.25, '17': 0}});
+  assert.deepEqual(validateMetalPrices({...original, coatings: false}).prices_per_kg, {'16': 120});
+  assert.equal('prices_per_kg' in validateConfig(original), false);
+});
+
+test('metal prices reject absent mappings, invalid currencies, unsafe IDs and normalized duplicates', () => {
+  for (const raw of [undefined, null, [], {}, {prices_per_kg: {}}, {prices_per_kg: []}, {prices_per_kg: '120'}]) {
+    assert.throws(() => validateMetalPrices(raw));
+  }
+  for (const currency of ['ZZZ', '', null, false, {}]) {
+    assert.throws(() => validateMetalPrices({currency, prices_per_kg: {'16': 120}}), /валюта/);
+  }
+  for (const productId of ['0', '-1', '1.5', '1e2', ' 16', 'x', String(Number.MAX_SAFE_INTEGER + 1)]) {
+    assert.throws(() => validateMetalPrices({prices_per_kg: {[productId]: 120}}), /ID товара/);
+  }
+  assert.throws(() => validateMetalPrices({prices_per_kg: {'016': 120, '16': 121}}), /Повторная цена/);
+});
+
+test('metal price values reject blank, coercible and non-finite input instead of becoming zero', () => {
+  for (const price of ['', ' ', null, undefined, false, true, {}, [], Infinity, 'Infinity', -1, '1x']) {
+    assert.throws(() => validateMetalPrices({prices_per_kg: {'16': price}}), /цена за килограмм/);
+  }
+});
+
+test('explicit demo K3 values preserve the known total with separate unit/line rounding', () => {
+  const rows = [row(), row({ id: 'row-2', quantity: 12, coatingCode: 'paint', k1: '1,15', k2: '1,05', k3: '1,12' })];
   const result = calculateQuote(rows, config);
   assert.equal(result.valid, true);
   assert.equal(result.rows[0].unitPrice, 55094.86);
@@ -58,26 +81,100 @@ test('screenshot calculation and rounded unit versus rounded line differ explici
   assert.equal(calculateQuote(rows, { ...config, rounding: 'unit' }).total, 1948708.32);
 });
 
-test('Excel-adapted formula adds costs before K1/K2 and never reapplies coating factor', () => {
-  const result = calculateQuote([row({ basePrice: 100, fasteners: 10, extraCoating: 20, delivery: 30, quantity: 2, k1: 2, k2: 1.5, weight: 99999 })], { ...config, formulaMode: 'excel' });
+test('catalog applies manual K3 once and coating labels or retired coefficients never change prices', () => {
+  const input = row({basePrice: 100, quantity: 2, k1: 2, k2: 1.25, k3: 1.5, coatingFactor: 99,
+    fasteners: -10, extraCoating: '', delivery: Infinity, weight: -1, pricePerKg: {}});
+  const before = JSON.stringify(input);
+  for (const coatingCode of ['none', 'zinc', 'paint']) {
+    const legacyConfig = {...config, coatings: config.coatings.map(coating => ({...coating, coefficient: 99}))};
+    const result = calculateQuote([{...input, coatingCode}], legacyConfig);
+    assert.equal(result.valid, true);
+    assert.equal(result.rows[0].unitPrice, 375);
+    assert.equal(result.total, 750);
+    assert.equal('coatingFactor' in result.rows[0], false);
+  }
+  assert.equal(JSON.stringify(input), before);
+  for (const coefficient of [undefined, -1, Infinity, '', {}]) {
+    const labels = validateConfig({...config, coatings: [{code: 'zinc', name: 'Переименовано', coefficient}]});
+    assert.deepEqual(labels.coatings, [{code: 'zinc', name: 'Переименовано'}]);
+    assert.equal(calculateQuote([input], labels).total, 750);
+  }
+});
+
+test('Excel formula applies K1/K2/K3 to price per kg times unit weight, then adds unit fasteners', () => {
+  const input = excelRow();
+  const before = JSON.stringify(input);
+  const result = calculateQuote([input], excelConfig);
   assert.equal(result.valid, true);
-  assert.equal(result.rows[0].unitPrice, 480);
-  assert.equal(result.total, 960);
-  assert.equal(result.rows[0].coatingFactor, 1.18);
+  assert.equal(result.rows[0].unitPrice, 370);
+  assert.equal(result.total, 740);
+  assert.equal('coatingFactor' in result.rows[0], false);
+  assert.equal(JSON.stringify(input), before);
+});
+
+test('Excel totals ignore coating factor, catalog price and retired extra coating/delivery values', () => {
+  for (const overrides of [
+    {coatingCode: 'paint'},
+    {basePrice: undefined, extraCoating: undefined, delivery: undefined},
+    {basePrice: -1, extraCoating: '', delivery: Infinity},
+    {basePrice: 1e308, extraCoating: -100, delivery: {}},
+  ]) {
+    const result = calculateQuote([excelRow(overrides)], excelConfig);
+    assert.equal(result.valid, true);
+    assert.equal(result.total, 740);
+  }
   assert.equal(calculateQuote([row({ basePrice: 100, quantity: 1, k1: 1, k2: 1, weight: -100 })], config).total, 118);
 });
 
-test('money rounds decimal halves away from zero and K1/K2 may be zero or negative', () => {
-  const minimal = overrides => row({ basePrice: '0,005', coatingCode: 'none', quantity: 1, k1: 1, k2: 1, ...overrides });
+test('Excel decimal arithmetic preserves line/unit rounding for fractional weights and quantities', () => {
+  const input = excelRow({pricePerKg: '0,05', weight: '0,3', quantity: '0,5', k1: 1, k2: 1, k3: '0,5', fasteners: 0});
+  const line = calculateQuote([input], excelConfig);
+  assert.equal(line.valid, true);
+  assert.equal(line.rows[0].unitPrice, 0.01);
+  assert.equal(line.total, 0);
+  assert.equal(line.quantity, 0.5);
+  assert.equal(calculateQuote([input], {...excelConfig, rounding: 'unit'}).total, 0.01);
+  const half = excelRow({pricePerKg: '0,005', weight: 1, quantity: 3, k1: 1, k2: 1, k3: -1, fasteners: 0});
+  assert.equal(calculateQuote([half], excelConfig).rows[0].unitPrice, -0.01);
+  assert.equal(calculateQuote([half], excelConfig).total, -0.02);
+});
+
+test('Excel signed/zero coefficients affect material cost while fasteners remain unscaled', () => {
+  assert.equal(calculateQuote([excelRow({k3: 0})], excelConfig).total, 20);
+  assert.equal(calculateQuote([excelRow({k3: -1.2})], excelConfig).total, -700);
+  assert.equal(calculateQuote([excelRow({k1: -2, k2: -1.5})], excelConfig).total, 740);
+  assert.equal(calculateQuote([excelRow({pricePerKg: 0})], excelConfig).total, 20);
+  assert.equal(calculateQuote([excelRow({fasteners: undefined})], excelConfig).total, 720);
+});
+
+test('Excel requires valid price/kg, positive unit weight, K3 and nonnegative unit fasteners', () => {
+  for (const overrides of [
+    {pricePerKg: undefined}, {pricePerKg: ''}, {pricePerKg: -1}, {pricePerKg: Infinity},
+    {weight: undefined}, {weight: ''}, {weight: 0}, {weight: -1}, {weight: Infinity},
+    {k3: undefined}, {k3: ''}, {k3: Infinity}, {k3: {}},
+    {fasteners: ''}, {fasteners: null}, {fasteners: -1}, {fasteners: Infinity},
+  ]) {
+    const result = calculateQuote([excelRow(), excelRow(overrides)], excelConfig);
+    assert.equal(result.valid, false, JSON.stringify(overrides));
+    assert.equal(result.total, null);
+    assert.ok(result.errors.length);
+    assert.equal(result.rows[1].unitPrice, null);
+  }
+});
+
+test('money rounds decimal halves away from zero and all three coefficients may be zero or negative', () => {
+  const minimal = overrides => row({ basePrice: '0,005', coatingCode: 'none', quantity: 1, k1: 1, k2: 1, k3: 1, ...overrides });
   assert.equal(calculateQuote([minimal({})], config).total, 0.01);
   assert.equal(calculateQuote([minimal({ k1: -1 })], config).total, -0.01);
   assert.equal(calculateQuote([minimal({ k1: 0 })], config).total, 0);
   assert.equal(calculateQuote([minimal({ k1: -2, k2: -3 })], config).total, 0.03);
+  assert.equal(calculateQuote([minimal({ k3: -1 })], config).total, -0.01);
+  assert.equal(calculateQuote([minimal({ k3: 0 })], config).total, 0);
   assert.equal(calculateQuote([minimal({ basePrice: '1.005' })], config).total, 1.01);
 });
 
 test('decimal quantities are supported and input rows are unchanged', () => {
-  const input = row({ basePrice: '0,1', coatingCode: 'none', quantity: '0,3', k1: 1, k2: 1 });
+  const input = row({ basePrice: '0,1', coatingCode: 'none', quantity: '0,3', k1: 1, k2: 1, k3: 1 });
   const before = JSON.stringify(input);
   const result = calculateQuote([input], config);
   assert.equal(result.total, 0.03);
@@ -86,7 +183,7 @@ test('decimal quantities are supported and input rows are unchanged', () => {
 });
 
 test('one bad row invalidates whole quote and prevents a partial total', () => {
-  for (const overrides of [{ quantity: 0 }, { quantity: '' }, { k1: '' }, { k2: Infinity }, { basePrice: -1 }, { coatingCode: 'unknown' }, { currency: 'USD' }, { delivery: -1 }]) {
+  for (const overrides of [{ quantity: 0 }, { quantity: '' }, { k1: '' }, { k2: Infinity }, { k3: undefined }, {k3: ''}, {k3: Infinity}, {k3: false}, { basePrice: -1 }, { coatingCode: 'unknown' }, { currency: 'USD' }]) {
     const result = calculateQuote([row(), row(overrides)], config);
     assert.equal(result.valid, false, JSON.stringify(overrides));
     assert.equal(result.total, null);
@@ -102,45 +199,4 @@ test('overflow cannot produce a usable infinite total', () => {
   assert.equal(result.valid, false);
   assert.equal(result.total, null);
   assert.match(result.errors.join(' '), /диапазон/);
-});
-
-test('relations normalize numeric IDs, group kit files and preserve drawing ambiguity', () => {
-  const original = relations();
-  const before = JSON.stringify(original);
-  const normalized = normalizeRelations(original);
-  assert.equal(normalized.product_drawings[0].product_id, '101');
-  assert.equal(normalized.product_drawings[2].drawing_name, 'Чертёж 1');
-  assert.equal(normalized.product_drawings[2].drawing_file_id, '701');
-  assert.equal(JSON.stringify(original), before);
-  const resolved = resolveRelations(101, normalized);
-  assert.equal(resolved.drawings.length, 2);
-  assert.equal(resolved.drawings[0].kits.length, 1);
-  assert.deepEqual(resolved.drawings[0].kits[0].files.map(file => file.id), ['801', '802']);
-  assert.equal(resolved.drawings[0].kits[0].name, 'Комплект');
-  assert.deepEqual(resolveRelations('unlinked', normalized), { drawings: [] });
-});
-
-test('relations reject duplicate pairs, dangling references and contradictory metadata', () => {
-  let raw = relations();
-  raw.product_drawings.push({ ...raw.product_drawings[0] });
-  assert.throws(() => normalizeRelations(raw), /Повторная связь товара/);
-  raw = relations(); raw.drawing_kd[0].drawing_id = 'missing';
-  assert.throws(() => normalizeRelations(raw), /неизвестный чертёж/);
-  raw = relations(); raw.product_drawings[2].drawing_name = 'Несовместимое имя';
-  assert.throws(() => normalizeRelations(raw), /противоречивые/);
-  raw = relations(); raw.drawing_kd[1].kit_name = 'Другое имя';
-  assert.throws(() => normalizeRelations(raw), /противоречивые/);
-  raw = relations(); raw.drawing_kd.push({ ...raw.drawing_kd[0] });
-  assert.throws(() => normalizeRelations(raw), /Повторная связь комплекта/);
-  raw = relations(); raw.drawing_kd[1].file_id = 801;
-  assert.throws(() => normalizeRelations(raw), /Повторная/);
-});
-
-test('malformed IDs and file metadata without file ID cannot enter lookup', () => {
-  for (const invalidId of ['', '  ', null, {}, [], true, 0, 1.5, Number.MAX_SAFE_INTEGER + 1, 'a\u0000b']) {
-    const raw = relations(); raw.product_drawings[0].product_id = invalidId;
-    assert.throws(() => normalizeRelations(raw));
-  }
-  const raw = relations(); delete raw.drawing_kd[0].file_id;
-  assert.throws(() => normalizeRelations(raw), /без ID/);
 });

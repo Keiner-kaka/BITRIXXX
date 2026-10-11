@@ -312,3 +312,262 @@ test('existing VAT metadata is normalized and preserved during full deal replace
   assert.equal(params.productRows[0].taxRate, 20);
   assert.equal(params.productRows[0].taxIncluded, 'Y');
 });
+
+function documentRoutes(overrides = {}) {
+  return {
+    'crm.deal.get': { data: { ID: '12', CATEGORY_ID: '3', CURRENCY_ID: 'RUB', TITLE: 'Текущая сделка' } },
+    'crm.documentgenerator.template.get': { data: { template: {
+      id: '39', name: 'КП ЮЗМ', active: 'Y', isDeleted: 'N', entityTypeId: ['2_category_3'],
+    } } },
+    'crm.documentgenerator.document.add': { data: { document: {
+      id: 61, title: 'КП ЮЗМ 1', templateId: '39', entityTypeId: '2', entityId: '12',
+      downloadUrl: 'https://portal.example/bitrix/document?id=61',
+    } } },
+    ...overrides,
+  };
+}
+
+function documentSnapshot(overrides = {}) {
+  return snapshot({
+    companyName: 'ООО «Клиент из версии КП»', total: 221.06,
+    config: { currency: 'RUB', coatings: [
+      { code: 'zinc', name: 'Цинкование' }, { code: 'paint', name: 'Окраска RAL 9005' },
+    ] },
+    documentFields: { YuzmPaymentTerms: 'Аванс 50%', YuzmManagerName: 'Иван Петров' },
+    rows: [
+      { productId: '101', productName: 'Изделие версии А', coatingCode: 'zinc',
+        quantity: 2, unitPrice: 100.25, lineTotal: 200.5, currency: 'RUB', executionTerm: '10 рабочих дней', valid: true },
+      { productId: '102', productName: 'Изделие версии Б', coatingCode: 'paint',
+        quantity: 3, unitPrice: 6.85, lineTotal: 20.56, currency: 'RUB', executionTerm: '25 рабочих дней', valid: true },
+    ],
+    ...overrides,
+  });
+}
+
+test('registered templates accept object pages and filter inactive, deleted and other deal categories', async () => {
+  const { api, sdk } = await adapter(documentRoutes({
+    'crm.documentgenerator.template.list': { pages: [
+      { templates: {
+        39: { id: '39', name: 'Все сделки', active: 'Y', isDeleted: 'N', entityTypeId: ['2'] },
+        40: { id: '40', name: 'Другое направление', active: 'Y', entityTypeId: ['2_category_7'] },
+      } },
+      { templates: {
+        41: { id: '41', name: 'Направление 3', active: 'Y', entityTypeId: ['2_category_3'] },
+        42: { id: '42', name: 'Неактивный', active: 'N', entityTypeId: ['2'] },
+        43: { id: '43', name: 'Удалённый', active: 'Y', isDeleted: 'Y', entityTypeId: ['2'] },
+      } },
+    ] },
+  }));
+  assert.deepEqual(await api.listDocumentTemplates(12), [
+    { id: '39', name: 'Все сделки' }, { id: '41', name: 'Направление 3' },
+  ]);
+  const request = sdk.calls.find(call => call.method === 'crm.documentgenerator.template.list');
+  assert.deepEqual(request.params.filter.entityTypeId, ['2', '2_category_3']);
+  assert.equal(request.params.filter.active, 'Y');
+  assert.equal(sdk.calls.some(call => call.method.endsWith('.add') || call.method.endsWith('.set')), false);
+});
+
+test('template arrays remain supported and object-shaped catalog pages remain invalid', async () => {
+  const { api } = await adapter(documentRoutes({
+    'crm.documentgenerator.template.list': { data: { templates: [
+      { id: '39', name: 'КП', active: 'Y', entityTypeId: ['2'] },
+    ] } },
+    'catalog.catalog.list': { data: { catalogs: { 7: { id: 7 } } } },
+  }));
+  assert.deepEqual(await api.listDocumentTemplates(12), [{ id: '39', name: 'КП' }]);
+  await assert.rejects(api.searchProducts(), /нет массива catalogs/);
+});
+
+test('template listing keeps access errors and never exposes auth descriptions', async () => {
+  const { api } = await adapter(documentRoutes({
+    'crm.documentgenerator.template.list': { error: 'DOCGEN_ACCESS_ERROR', description: 'https://portal.example/?auth=secret' },
+  }));
+  await assert.rejects(api.listDocumentTemplates(12), error => error.code === 'DOCGEN_ACCESS_ERROR'
+    && !error.message.includes('secret'));
+});
+
+test('document payload uses the exact saved KP rows, shared table aliases and independent terms without deal writes', async () => {
+  const { api, sdk } = await adapter(documentRoutes());
+  const quote = documentSnapshot({ documentFields: {
+    YuzmPaymentTerms: 'Аванс 50%', YuzmManagerName: 'Иван Петров',
+    DocumentNumber: 'Do not override native numbering', arbitrary: 'Not an allowed template field',
+  } });
+  const original = structuredClone(quote);
+  assert.deepEqual(await api.createQuoteDocument(12, 39, quote), {
+    id: '61', title: 'КП ЮЗМ 1', downloadUrl: 'https://portal.example/bitrix/document?id=61',
+    pdfUrl: '', publicUrl: '', conversionError: false,
+  });
+  assert.deepEqual(quote, original);
+  const request = sdk.calls.find(call => call.method === 'crm.documentgenerator.document.add').params;
+  assert.equal(request.templateId, 39);
+  assert.equal(request.entityTypeId, 2);
+  assert.equal(request.entityId, 12);
+  assert.deepEqual(request.values.KpItems, [
+    { Name: 'Изделие версии А', Coating: 'Цинкование', Quantity: '2', Price: '100,25', Total: '200,50', ExecutionTerm: '10 рабочих дней' },
+    { Name: 'Изделие версии Б', Coating: 'Окраска RAL 9005', Quantity: '3', Price: '6,85', Total: '20,56', ExecutionTerm: '25 рабочих дней' },
+  ]);
+  assert.deepEqual(request.fields.KpItems, {
+    PROVIDER: 'Bitrix\\DocumentGenerator\\DataProvider\\ArrayDataProvider',
+    OPTIONS: { ITEM_NAME: 'Item', ITEM_PROVIDER: 'Bitrix\\DocumentGenerator\\DataProvider\\HashDataProvider' },
+  });
+  assert.deepEqual(request.fields.ProductsIndex, { VALUE: 'KpItems.INDEX' });
+  assert.deepEqual(request.fields.ProductsProductName, { VALUE: 'KpItems.Item.Name' });
+  assert.deepEqual(request.fields.YuzmCoating, { VALUE: 'KpItems.Item.Coating' });
+  assert.deepEqual(request.fields.ProductsProductQuantity, { VALUE: 'KpItems.Item.Quantity' });
+  assert.deepEqual(request.fields.ProductsProductPriceBrutto, { VALUE: 'KpItems.Item.Price' });
+  assert.deepEqual(request.fields.ProductsProductPriceBruttoSum, { VALUE: 'KpItems.Item.Total' });
+  assert.deepEqual(request.fields.YuzmDeliveryPeriod, { VALUE: 'KpItems.Item.ExecutionTerm' });
+  assert.deepEqual(request.fields.RequisiteRqCompanyName, { VALUE: quote.companyName });
+  assert.deepEqual(request.fields.TotalSum, { VALUE: '221,06' });
+  assert.deepEqual(request.fields.YuzmPaymentTerms, { VALUE: 'Аванс 50%' });
+  assert.deepEqual(request.fields.YuzmDeliveryTerms, { VALUE: '' });
+  assert.deepEqual(request.fields.YuzmManagerName, { VALUE: 'Иван Петров' });
+  assert.equal('DocumentNumber' in request.fields, false);
+  assert.equal('DocumentCreateTime' in request.fields, false);
+  assert.equal('arbitrary' in request.fields, false);
+  assert.deepEqual(sdk.calls.map(call => call.method), [
+    'crm.deal.get', 'crm.documentgenerator.template.get', 'crm.documentgenerator.document.add',
+  ]);
+});
+
+test('document quantity accepts calculator numeric syntax and preserves entered commercial text', async () => {
+  const { api, sdk } = await adapter(documentRoutes());
+  const quote = documentSnapshot({
+    total: 1000.5,
+    documentFields: { YuzmPaymentTerms: '  Аванс 50%\nОстаток перед отгрузкой  ' },
+    rows: [{ ...documentSnapshot().rows[0], quantity: '1 000,5', unitPrice: 1,
+      lineTotal: 1000.5, executionTerm: '  10–15 рабочих дней\nпосле оплаты  ' }],
+  });
+  await api.createQuoteDocument(12, 39, quote);
+  const request = sdk.calls.find(call => call.method === 'crm.documentgenerator.document.add').params;
+  assert.equal(request.values.KpItems[0].Quantity, '1000,5');
+  assert.equal(request.values.KpItems[0].ExecutionTerm, quote.rows[0].executionTerm);
+  assert.deepEqual(request.fields.YuzmPaymentTerms, { VALUE: quote.documentFields.YuzmPaymentTerms });
+  for (const quantity of ['1\u00a0000,5', '1\u202f000,5']) {
+    await api.createQuoteDocument(12, 39, { ...quote, rows: [{ ...quote.rows[0], quantity }] });
+    assert.equal(sdk.calls.at(-1).params.values.KpItems[0].Quantity, '1000,5');
+  }
+  for (const quantity of ['10 00,5', '1 000  ,5']) {
+    await assert.rejects(api.createQuoteDocument(12, 39, { ...quote, rows: [{ ...quote.rows[0], quantity }] }), /Количество/);
+  }
+});
+
+test('document text rejects whitespace-only required fields, controls and excessive length before add', async () => {
+  const { api, sdk } = await adapter(documentRoutes());
+  const quote = documentSnapshot();
+  for (const overrides of [
+    { companyName: '   ' },
+    { documentFields: { YuzmPaymentTerms: 'Недопустимый\u0000текст' } },
+    { documentFields: { YuzmPaymentTerms: 'А'.repeat(10001) } },
+    { rows: [{ ...quote.rows[0], productName: '   ' }] },
+    { rows: [{ ...quote.rows[0], executionTerm: 'Срок\u0007' }] },
+  ]) {
+    await assert.rejects(api.createQuoteDocument(12, 39, documentSnapshot(overrides)));
+  }
+  assert.equal(sdk.calls.some(call => call.method.endsWith('.add')), false);
+});
+
+test('document creation rejects missing, deactivated, deleted and wrong-category templates before add', async () => {
+  for (const template of [undefined,
+    { id: '39', name: 'КП', active: 'N', entityTypeId: ['2'] },
+    { id: '39', name: 'КП', active: 'Y', isDeleted: 'Y', entityTypeId: ['2'] },
+    { id: '39', name: 'КП', active: 'Y', entityTypeId: ['2_category_7'] },
+    { id: '40', name: 'КП', active: 'Y', entityTypeId: ['2'] },
+  ]) {
+    const { api, sdk } = await adapter(documentRoutes({
+      'crm.documentgenerator.template.get': { data: { template } },
+    }));
+    await assert.rejects(api.createQuoteDocument(12, 39, documentSnapshot()), /шаблон/i);
+    assert.equal(sdk.calls.some(call => call.method.endsWith('.add')), false);
+  }
+});
+
+test('nonexistent deals and missing or invalid categories never consume a document number', async () => {
+  for (const deal of [null, { ID: '99', CATEGORY_ID: 3, CURRENCY_ID: 'RUB' },
+    { ID: '12', CURRENCY_ID: 'RUB' }, { ID: '12', CATEGORY_ID: -1, CURRENCY_ID: 'RUB' }]) {
+    const { api, sdk } = await adapter(documentRoutes({ 'crm.deal.get': { data: deal } }));
+    await assert.rejects(api.createQuoteDocument(12, 39, documentSnapshot()), /сделк/);
+    assert.equal(sdk.calls.length, 1);
+  }
+});
+
+test('wrong snapshot scope, invalid money or totals and mixed currencies cannot reach document.add', async () => {
+  const quote = documentSnapshot();
+  for (const overrides of [
+    { dealId: '99' }, { total: 300 }, { total: Infinity }, { valid: false }, { companyName: '' },
+    { rows: [] }, { rows: [{ ...quote.rows[0], unitPrice: -1 }] },
+    { rows: [{ ...quote.rows[0], lineTotal: -1 }] },
+    { rows: [{ ...quote.rows[0], unitPrice: NaN }] },
+    { rows: [{ ...quote.rows[0], quantity: 0 }] },
+    { rows: [{ ...quote.rows[0], quantity: [1] }] },
+    { rows: [{ ...quote.rows[0], currency: 'USD' }] },
+    { rows: [{ ...quote.rows[0], valid: false }] },
+  ]) {
+    const { api, sdk } = await adapter(documentRoutes());
+    await assert.rejects(api.createQuoteDocument(12, 39, documentSnapshot(overrides)));
+    assert.equal(sdk.calls.some(call => call.method.endsWith('.add')), false);
+  }
+  const { api, sdk } = await adapter(documentRoutes({
+    'crm.deal.get': { data: { ID: '12', CATEGORY_ID: 3, CURRENCY_ID: 'USD' } },
+  }));
+  await assert.rejects(api.createQuoteDocument(12, 39, quote), /Валюта сделки/);
+  assert.equal(sdk.calls.some(call => call.method.endsWith('.add')), false);
+});
+
+test('failed or malformed creation cannot become successful or automatically retry add', async () => {
+  for (const result of [
+    { error: 'DOCGEN_LIMIT_ERROR', description: 'https://portal.example/?auth=secret' },
+    { data: {} }, { data: { document: {} } },
+    { data: { document: { id: 61, templateId: '99' } } },
+  ]) {
+    const { api, sdk } = await adapter(documentRoutes({ 'crm.documentgenerator.document.add': result }));
+    await assert.rejects(api.createQuoteDocument(12, 39, documentSnapshot()), error => !error.message.includes('secret'));
+    assert.equal(sdk.calls.filter(call => call.method.endsWith('.add')).length, 1);
+  }
+  const { api } = await adapter(documentRoutes({
+    'crm.documentgenerator.document.add': { data: { document: {
+      id: '61', downloadUrl: 'javascript:alert("secret")',
+    } } },
+  }));
+  await assert.rejects(api.createQuoteDocument(12, 39, documentSnapshot()), error =>
+    error.code === 'DOCUMENT_RESPONSE_UNVERIFIED' && error.documentId === '61' && !error.message.includes('secret'));
+});
+
+test('document refresh obtains asynchronous PDF with portal-relative URLs without creating another document', async () => {
+  const routes = documentRoutes({
+    'crm.documentgenerator.document.get': { data: { document: {
+      id: '61', title: 'КП ЮЗМ 1', downloadUrl: '/bitrix/document?id=61', pdfUrl: '/bitrix/pdf?id=61', publicUrl: null,
+    } } },
+  });
+  const { api, sdk } = await adapter(routes, { location: { href: 'https://app.example/index.php' } });
+  sdk.getDomain = () => 'portal.example';
+  await api.createQuoteDocument(12, 39, documentSnapshot());
+  const refreshed = await api.getQuoteDocument(61);
+  assert.equal(refreshed.downloadUrl, 'https://portal.example/bitrix/document?id=61');
+  assert.equal(refreshed.pdfUrl, 'https://portal.example/bitrix/pdf?id=61');
+  assert.equal(sdk.calls.filter(call => call.method.endsWith('.add')).length, 1);
+  assert.equal(sdk.calls.at(-1).method, 'crm.documentgenerator.document.get');
+  assert.deepEqual(sdk.calls.at(-1).params, { id: 61 });
+});
+
+test('document responses reject unsafe links and different IDs without revealing returned URL contents', async () => {
+  for (const document of [
+    { id: '61', downloadUrl: 'javascript:alert(1)' },
+    { id: '61', pdfUrl: 'https://user:secret@portal.example/document' },
+    { id: '62', downloadUrl: 'https://portal.example/?auth=secret' },
+  ]) {
+    const { api } = await adapter(documentRoutes({
+      'crm.documentgenerator.document.get': { data: { document } },
+    }));
+    await assert.rejects(api.getQuoteDocument(61), error => !/secret|javascript/.test(error.message));
+  }
+  const { api } = await adapter(documentRoutes({
+    'crm.documentgenerator.document.get': { data: { document: {
+      id: '61', downloadUrl: 'https://portal.example/file', isTransformationError: true,
+      transformationErrorMessage: 'https://portal.example/?auth=secret',
+    } } },
+  }));
+  assert.deepEqual(await api.getQuoteDocument(61), {
+    id: '61', title: '', downloadUrl: 'https://portal.example/file', pdfUrl: '', publicUrl: '', conversionError: true,
+  });
+});

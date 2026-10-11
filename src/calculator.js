@@ -71,14 +71,36 @@ export function validateConfig(raw) {
     object(entry, `Покрытие ${index + 1}`);
     const code = id(entry.code, `Код покрытия ${index + 1}`);
     const name = optionalText(entry.name, 'Название покрытия') || code;
-    const coefficient = parseNumber(entry.coefficient);
-    if (!Number.isFinite(coefficient) || coefficient < 0) throw new Error(`Некорректный коэффициент покрытия «${name}».`);
     if (seen.has(code)) throw new Error(`Повторный код покрытия «${code}».`);
     seen.add(code);
-    return { code, name, coefficient };
+    return { code, name };
   });
-  // Legacy prices_per_kg is deliberately neither read nor used: weight is excluded.
-  return { version: version(raw.version), currency, coatings, formulaMode, rounding };
+  // Metal prices are loaded separately; importing coating settings never changes them.
+  return { version: version(raw.version), currency, coatings, formulaMode, rounding, calculationVersion: 2 };
+}
+
+/** Validate the separately loaded per-product metal price file. */
+export function validateMetalPrices(raw) {
+  object(raw, 'Цены металла');
+  const currency = raw.currency === undefined ? 'RUB' : String(raw.currency).trim().toUpperCase();
+  if (!isCurrencySupported(currency)) throw new Error('В ценах металла указана неподдерживаемая валюта.');
+  const prices = object(raw.prices_per_kg, 'Цены за килограмм');
+  const entries = Object.entries(prices);
+  if (!entries.length) throw new Error('Нужен непустой справочник цен за килограмм.');
+  const seen = new Set();
+  const normalized = entries.map(([productId, price]) => {
+    const numericId = Number(productId);
+    if (!/^\d+$/.test(productId) || !Number.isSafeInteger(numericId) || numericId <= 0) {
+      throw new Error('Цена металла: ID товара должен быть положительным безопасным целым числом.');
+    }
+    const key = String(numericId);
+    if (seen.has(key)) throw new Error(`Повторная цена металла для товара #${key}.`);
+    seen.add(key);
+    const value = parseNumber(price);
+    if (!Number.isFinite(value) || value < 0) throw new Error(`Товар #${key}: цена за килограмм должна быть конечным неотрицательным числом.`);
+    return [key, value];
+  });
+  return {version: version(raw.version), currency, prices_per_kg: Object.fromEntries(normalized)};
 }
 
 function id(value, label) {
@@ -92,108 +114,10 @@ function id(value, label) {
   return result;
 }
 
-function optionalId(value, label) {
-  if (value === undefined || value === null || value === '') return undefined;
-  return id(value, label);
-}
-
 function optionalText(value, label) {
   if (value === undefined || value === null || value === '') return undefined;
   if (typeof value !== 'string' || /[\u0000-\u001f\u007f]/.test(value)) throw new Error(`${label}: ожидается текст.`);
   return value.trim() || undefined;
-}
-
-function mergeMetadata(map, key, values, label) {
-  const previous = map.get(key) || {};
-  for (const [field, value] of Object.entries(values)) {
-    if (value === undefined) continue;
-    if (previous[field] !== undefined && previous[field] !== value) throw new Error(`${label} «${key}»: противоречивые данные.`);
-    previous[field] = value;
-  }
-  map.set(key, previous);
-}
-
-/** Normalize a Disk JSON reference file and fail before using ambiguous data. */
-export function normalizeRelations(raw) {
-  object(raw, 'Связи');
-  if (!Array.isArray(raw.product_drawings) || !Array.isArray(raw.drawing_kd)) {
-    throw new Error('В файле связей нужны массивы product_drawings и drawing_kd.');
-  }
-  const drawingMetadata = new Map();
-  const productMetadata = new Map();
-  const kitMetadata = new Map();
-  const fileMetadata = new Map();
-  const productPairs = new Set();
-  const kitFiles = new Set();
-
-  const product_drawings = raw.product_drawings.map((entry, index) => {
-    object(entry, `Связь товара ${index + 1}`);
-    const result = {
-      product_id: id(entry.product_id, 'Товар'),
-      drawing_id: id(entry.drawing_id, 'Чертёж'),
-    };
-    const productName = optionalText(entry.product_name, 'Наименование товара');
-    const drawingName = optionalText(entry.drawing_name, 'Название чертежа');
-    const drawingFileId = optionalId(entry.drawing_file_id, 'Файл чертежа');
-    if (productName !== undefined) result.product_name = productName;
-    if (drawingName !== undefined) result.drawing_name = drawingName;
-    if (drawingFileId !== undefined) result.drawing_file_id = drawingFileId;
-    const pair = JSON.stringify([result.product_id, result.drawing_id]);
-    if (productPairs.has(pair)) throw new Error(`Повторная связь товара «${result.product_id}» и чертежа «${result.drawing_id}».`);
-    productPairs.add(pair);
-    mergeMetadata(productMetadata, result.product_id, { name: productName }, 'Товар');
-    mergeMetadata(drawingMetadata, result.drawing_id, { name: drawingName, fileId: drawingFileId }, 'Чертёж');
-    return result;
-  });
-
-  const drawing_kd = raw.drawing_kd.map((entry, index) => {
-    object(entry, `Связь комплекта КД ${index + 1}`);
-    const result = { drawing_id: id(entry.drawing_id, 'Чертёж'), kit_id: id(entry.kit_id, 'Комплект КД') };
-    if (!drawingMetadata.has(result.drawing_id)) throw new Error(`Комплект КД ссылается на неизвестный чертёж «${result.drawing_id}».`);
-    const kitName = optionalText(entry.kit_name, 'Название комплекта КД');
-    const fileId = optionalId(entry.file_id, 'Файл КД');
-    const fileName = optionalText(entry.file_name, 'Название файла КД');
-    if (fileName && !fileId) throw new Error('Название файла КД задано без ID файла.');
-    if (kitName !== undefined) result.kit_name = kitName;
-    if (fileId !== undefined) result.file_id = fileId;
-    if (fileName !== undefined) result.file_name = fileName;
-    const pair = JSON.stringify([result.drawing_id, result.kit_id, fileId ?? null]);
-    if (kitFiles.has(pair)) throw new Error(`Повторная связь комплекта КД «${result.kit_id}» с файлом.`);
-    kitFiles.add(pair);
-    mergeMetadata(kitMetadata, result.kit_id, { name: kitName }, 'Комплект КД');
-    if (fileId) mergeMetadata(fileMetadata, fileId, { name: fileName }, 'Файл КД');
-    return result;
-  });
-
-  // Fill omitted metadata from other records describing the same ID.
-  for (const entry of product_drawings) {
-    const drawing = drawingMetadata.get(entry.drawing_id);
-    const product = productMetadata.get(entry.product_id);
-    if (drawing.name) entry.drawing_name = drawing.name;
-    if (drawing.fileId) entry.drawing_file_id = drawing.fileId;
-    if (product.name) entry.product_name = product.name;
-  }
-  for (const entry of drawing_kd) {
-    const kit = kitMetadata.get(entry.kit_id);
-    if (kit.name) entry.kit_name = kit.name;
-    const file = entry.file_id && fileMetadata.get(entry.file_id);
-    if (file?.name) entry.file_name = file.name;
-  }
-  return { version: version(raw.version), product_drawings, drawing_kd };
-}
-
-export function resolveRelations(productId, relations) {
-  const product = id(productId, 'Товар');
-  const normalized = normalizeRelations(relations);
-  const drawings = normalized.product_drawings.filter(entry => entry.product_id === product).map(entry => {
-    const kits = new Map();
-    for (const related of normalized.drawing_kd.filter(item => item.drawing_id === entry.drawing_id)) {
-      if (!kits.has(related.kit_id)) kits.set(related.kit_id, { id: related.kit_id, name: related.kit_name || related.kit_id, files: [] });
-      if (related.file_id) kits.get(related.kit_id).files.push({ id: related.file_id, name: related.file_name || related.file_id });
-    }
-    return { id: entry.drawing_id, name: entry.drawing_name || entry.drawing_id, fileId: entry.drawing_file_id, kits: [...kits.values()] };
-  });
-  return { drawings };
 }
 
 // Decimal coefficients are represented exactly as integer × 10^(-scale).
@@ -251,25 +175,29 @@ export function calculateQuote(rows, rawConfig) {
   const quoteErrors = [];
   let sum = 0n;
   let quantitySum = decimal(0);
-  const coatings = new Map(config.coatings.map(coating => [coating.code, coating]));
+  const coatingCodes = new Set(config.coatings.map(coating => coating.code));
   const calculatedRows = rows.map((input, index) => {
     const row = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
     const errors = [];
     if (row !== input) errors.push('Некорректная позиция.');
-    const coating = coatings.get(String(row.coatingCode ?? ''));
-    if (!coating) errors.push('Выберите покрытие из справочника.');
+    if (!coatingCodes.has(String(row.coatingCode ?? ''))) errors.push('Выберите покрытие из справочника.');
     if (row.currency !== config.currency) errors.push(`Валюта товара должна быть ${config.currency}; автоматическая конвертация не выполняется.`);
-    const fields = [
-      ['basePrice', 'Базовая цена', false, false],
+    const commonFields = [
       ['quantity', 'Количество', false, true],
-      ['k1', 'К1', true, false], ['k2', 'К2', true, false],
-      ['fasteners', 'Крепёж и покупные изделия', false, false],
-      ['extraCoating', 'Дополнительное покрытие', false, false],
-      ['delivery', 'Доставка', false, false],
+      ['k1', 'К1', true, false], ['k2', 'К2', true, false], ['k3', 'К3', true, false],
+    ];
+    const fields = config.formulaMode === 'excel' ? [
+      ...commonFields,
+      ['pricePerKg', 'Цена за килограмм', false, false],
+      ['weight', 'Вес единицы', false, true],
+      ['fasteners', 'Метизы за единицу', false, false],
+    ] : [
+      ['basePrice', 'Базовая цена', false, false],
+      ...commonFields,
     ];
     const values = {};
     for (const [field, label, signed, positive] of fields) {
-      const value = row[field] === undefined && ['fasteners', 'extraCoating', 'delivery'].includes(field) ? 0 : row[field];
+      const value = row[field] === undefined && field === 'fasteners' ? 0 : row[field];
       const number = parseNumber(value);
       if (!Number.isFinite(number)) { errors.push(`${label}: введите конечное число.`); continue; }
       if (positive && number <= 0) { errors.push(`${label}: значение должно быть больше нуля.`); continue; }
@@ -281,10 +209,14 @@ export function calculateQuote(rows, rawConfig) {
     let lineTotal = null;
     if (!errors.length) {
       try {
-        let rawUnit = config.formulaMode === 'catalog'
-          ? multiply(values.basePrice, decimal(coating.coefficient))
-          : add(add(add(values.basePrice, values.fasteners), values.extraCoating), values.delivery);
-        rawUnit = multiply(multiply(rawUnit, values.k1), values.k2);
+        let rawUnit;
+        if (config.formulaMode === 'excel') {
+          const materialCost = multiply(values.pricePerKg, values.weight);
+          const adjustedCost = multiply(multiply(multiply(materialCost, values.k1), values.k2), values.k3);
+          rawUnit = add(adjustedCost, values.fasteners);
+        } else {
+          rawUnit = multiply(multiply(multiply(values.basePrice, values.k1), values.k2), values.k3);
+        }
         const unitCents = cents(rawUnit);
         const lineCents = cents(multiply(config.rounding === 'unit' ? { n: unitCents, scale: 2 } : rawUnit, values.quantity));
         unitPrice = moneyNumber(unitCents);
@@ -297,7 +229,9 @@ export function calculateQuote(rows, rawConfig) {
       }
     }
     quoteErrors.push(...errors.map(error => `Позиция ${index + 1}: ${error}`));
-    return { ...row, unitPrice, lineTotal, coatingFactor: coating?.coefficient ?? null, valid: errors.length === 0, errors };
+    const calculatedRow = {...row, unitPrice, lineTotal, valid: errors.length === 0, errors};
+    delete calculatedRow.coatingFactor;
+    return calculatedRow;
   });
   let total = null;
   let quantity = Number(quantitySum.n) / 10 ** quantitySum.scale;
