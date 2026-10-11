@@ -594,6 +594,7 @@ function showQuote(snapshot) {
   openDialog('quoteDialog');
 }
 function settingsToForm(resetTemplate = !$('settingsDialog').open) {
+  updateConnectionDiagnostics();
   const s = state.settings;
   for (const key of ['dealId', 'pricesFileId', 'metalPricesFileId', 'historyFolderId']) $(key === 'dealId' ? 'dealIdInput' : key).value = s[key] || '';
   renderTemplates();
@@ -652,6 +653,10 @@ async function importFile(event) {
 async function searchProducts(query, target) {
   const request = (productSearchRequests.get(target) || 0) + 1;
   productSearchRequests.set(target, request);
+  if (connected && !query.trim()) {
+    $(target).textContent = 'Введите название или ID товара или вариации и нажмите «Найти».';
+    return;
+  }
   $(target).textContent = 'Поиск…';
   try {
     const matches = connected
@@ -665,6 +670,7 @@ async function searchProducts(query, target) {
     })));
     if (!matches.length) $(target).append(element('p', {class: 'empty-state', text: 'Товары и активные вариации не найдены. Можно искать по названию или ID основного товара и вариации.'}));
   } catch (error) { if (productSearchRequests.get(target) === request) $(target).textContent = safeError(error); }
+  finally { updateConnectionDiagnostics(); }
 }
 function chooseProduct(product) {
   if (product.currency !== config.currency) throw new Error('Валюта товара не совпадает с валютой КП. Автоматическая конвертация не выполняется.');
@@ -912,6 +918,7 @@ function updateConnectionDiagnostics() {
     ...diagnostics,
     connection_code: connectionCode,
     connected,
+    rest_requests: adapter.diagnostics(),
   }, null, 2);
 }
 function connectionMessage(message, waiting = false) {

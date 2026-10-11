@@ -17,6 +17,7 @@ const ALLOWED_METHODS = new Set([
 ]);
 const MAX_JSON_BYTES = 5 * 1024 * 1024;
 const QUOTE_TEMPLATE_OPTION = 'yuzmQuoteTemplateId';
+const MAX_SEARCH_ITEMS = 500;
 const DOCUMENT_FIELDS = [
   'YuzmPaymentTerms', 'YuzmFastenerTerms', 'YuzmDocumentsTerms', 'YuzmDeliveryTerms',
   'YuzmValidityTerms', 'YuzmManagerPosition', 'YuzmManagerName', 'YuzmManagerPhone',
@@ -89,16 +90,48 @@ function apiError(method, result) {
   // API descriptions can include request URLs, auth parameters or arbitrary server HTML.
   // Show only a constrained error code; never propagate those descriptions to the UI.
   const sdkError = result.error();
-  const raw = sdkError?.ex?.error ?? result.answer?.error
+  const details = sdkError?.getError?.() ?? sdkError?.ex;
+  const raw = details?.error ?? result.answer?.error
     ?? (typeof sdkError === 'string' || typeof sdkError === 'number' ? sdkError : 'API_ERROR');
-  const code = /^[A-Za-z_\d.-]{1,80}$/.test(String(raw)) ? String(raw) : 'API_ERROR';
-  const error = new Error(`Bitrix24: ${method} — ${code}. Проверьте права приложения и пользователя.`);
+  let code = /^[A-Za-z_\d.-]{1,80}$/.test(String(raw)) ? String(raw) : 'API_ERROR';
+  const description = details?.error_description ?? result.answer?.error_description ?? result.error_description?.();
+  // Empty/zero codes also represent fatal failures. Recognize only known missing-product
+  // messages, and replace them with our own text rather than exposing server content.
+  const productMethod = /^catalog\.product\.(?:(?:offer|sku)\.)?get$/.test(method) || method === 'crm.product.get';
+  const missingProduct = /^(?:(?:product(?: offer)?|offer|sku) does not exist\.?|product (?:is )?not found\.?)$/i;
+  if (productMethod && ['NOT_FOUND', 'ERROR_NOT_FOUND'].includes(String(raw))) code = 'PRODUCT_NOT_FOUND';
+  if (productMethod && [raw, description].some(value => typeof value === 'string' && missingProduct.test(value.trim()))) {
+    if (['', '0', 'NOT_FOUND', 'ERROR_NOT_FOUND', 'API_ERROR'].includes(String(raw)) || missingProduct.test(String(raw).trim())) {
+      code = 'PRODUCT_NOT_FOUND';
+    }
+  }
+  const hints = {
+    PRODUCT_NOT_FOUND: 'Товар с указанным ID не найден на этом портале.',
+    '200040300010': 'У сотрудника нет права на просмотр торгового каталога.',
+    '200040300040': 'У сотрудника нет права на чтение этого товара или его инфоблока.',
+    '200040300000': 'Инфоблок товара не найден на этом портале.',
+    insufficient_scope: 'Проверьте разрешения установленного приложения; после изменения прав переустановите его.',
+    QUERY_LIMIT_EXCEEDED: 'Превышен лимит запросов Bitrix24. Подождите и повторите поиск.',
+    OPERATION_TIME_LIMIT: 'Bitrix24 временно заблокировал метод из-за нагрузки. Повторите запрос позже.',
+    OVERLOAD_LIMIT: 'REST API портала заблокирован из-за нагрузки. Обратитесь в поддержку Bitrix24.',
+    INTERNAL_SERVER_ERROR: 'Внутренняя ошибка Bitrix24. Повторите запрос позже.',
+    ERROR_UNEXPECTED_ANSWER: 'Bitrix24 вернул неожиданный ответ. Повторите запрос позже.',
+    API_ERROR: 'Bitrix24 не вернул распознаваемый код ошибки. Проверьте запрос и доступ сотрудника к каталогу.',
+  };
+  const error = new Error(`Bitrix24: ${method} — ${code}. ${hints[code] ?? 'Проверьте права приложения и пользователя.'}`);
   error.code = code;
+  error.method = method;
   return error;
 }
 
 function unavailable(error) {
   return ['ERROR_METHOD_NOT_FOUND', 'METHOD_NOT_FOUND', 'ERROR_UNKNOWN_METHOD'].includes(error?.code);
+}
+
+function broadSearchError() {
+  const error = new Error('Слишком много совпадений в каталоге. Уточните название или введите ID товара или вариации.');
+  error.code = 'CATALOG_SEARCH_TOO_BROAD';
+  return error;
 }
 
 function variationParent(raw) {
@@ -178,6 +211,26 @@ export class BitrixAdapter {
     this.dealId = null;
     this._catalogs = null;
     this._basePriceType = null;
+    this._requests = [];
+  }
+
+  /** Only method names, counters, timing and safe codes; never request/response bodies. */
+  diagnostics() {
+    return this._requests.map(({startedAt, ...entry}) => ({...entry,
+      elapsed_ms: entry.elapsed_ms ?? Math.max(0, Date.now() - startedAt)}));
+  }
+
+  _trace(method) {
+    const entry = {method, state: 'pending', pages: 0, items: 0, startedAt: Date.now()};
+    this._requests.push(entry);
+    if (this._requests.length > 20) this._requests.shift();
+    return entry;
+  }
+
+  _finishTrace(entry, error) {
+    entry.state = error ? 'error' : 'success';
+    entry.elapsed_ms = Math.max(0, Date.now() - entry.startedAt);
+    if (error) entry.code = error.code ?? 'CLIENT_ERROR';
   }
 
   async init() {
@@ -232,15 +285,21 @@ export class BitrixAdapter {
 
   async call(method, params = {}) {
     this._guard(method);
+    const trace = this._trace(method);
     return new Promise((resolve, reject) => {
       let settled = false;
       const finish = (error, data) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        this._finishTrace(trace, error);
         error ? reject(error) : resolve(data);
       };
-      const timer = setTimeout(() => finish(new Error(`Bitrix24: ${method} — время ожидания истекло.`)), this.timeoutMs);
+      const timer = setTimeout(() => {
+        const error = new Error(`Bitrix24: ${method} — время ожидания истекло. Повторите запрос; при повторном сбое скопируйте диагностику из настроек.`);
+        error.code = 'REQUEST_TIMEOUT';
+        finish(error);
+      }, this.timeoutMs);
       try {
         this.sdk.callMethod(method, params, result => {
           try {
@@ -275,8 +334,9 @@ export class BitrixAdapter {
   }
 
   /** SDK Result.more()/next() preserve next offsets for every supported list method. */
-  async _list(method, params = {}, key = null) {
+  async _list(method, params = {}, key = null, {maxItems = Infinity} = {}) {
     this._guard(method);
+    const trace = this._trace(method);
     return new Promise((resolve, reject) => {
       const items = [];
       let pages = 0;
@@ -286,11 +346,16 @@ export class BitrixAdapter {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        this._finishTrace(trace, error);
         error ? reject(error) : resolve(items);
       };
       const armTimer = () => {
         clearTimeout(timer);
-        timer = setTimeout(() => finish(new Error(`Bitrix24: ${method} — время ожидания страницы истекло.`)), this.timeoutMs);
+        timer = setTimeout(() => {
+          const error = new Error(`Bitrix24: ${method} — время ожидания страницы истекло. Скопируйте диагностику из настроек.`);
+          error.code = 'REQUEST_TIMEOUT';
+          finish(error);
+        }, this.timeoutMs);
       };
       const consume = result => {
         if (settled) return;
@@ -307,6 +372,11 @@ export class BitrixAdapter {
           if (!Array.isArray(page)) return finish(new Error(`Bitrix24: ${method} — нет массива ${key ?? 'result'}.`));
           items.push(...page);
           pages += 1;
+          trace.pages = pages;
+          trace.items = items.length;
+          if (items.length > maxItems) {
+            return finish(broadSearchError());
+          }
           if (pages > 2000) return finish(new Error('Превышен лимит страниц. Уточните поиск в каталоге.'));
           const more = typeof result.more === 'function' ? result.more() : false;
           if (!more) return finish();
@@ -392,6 +462,7 @@ export class BitrixAdapter {
   }
 
   async _readProduct(productId) {
+    let missing = false;
     for (const [method, key] of [
       ['catalog.product.get', 'product'],
       ['catalog.product.offer.get', 'offer'],
@@ -399,10 +470,21 @@ export class BitrixAdapter {
     ]) {
       try {
         const data = await this.call(method, { id: Number(productId) });
-        if (String(data?.[key]?.id) !== productId) continue;
+        if (String(data?.[key]?.id) !== productId) {
+          throw new Error(`Bitrix24: ${method} — API не подтвердил ID запрошенного товара.`);
+        }
         return {raw: data[key], source: method};
-      } catch { /* A different product kind may own this ID; validate each response. */ }
+      } catch (error) {
+        if (error.code === 'PRODUCT_NOT_FOUND') missing = true;
+        else if (!unavailable(error)) throw error;
+      }
     }
+    if (missing) {
+      const error = new Error(`Товар #${productId} не найден на этом портале. Проверьте ID товара или вариации.`);
+      error.code = 'PRODUCT_NOT_FOUND';
+      throw error;
+    }
+    // Legacy lookup is appropriate only when every modern get method is unavailable.
     return null;
   }
 
@@ -426,7 +508,7 @@ export class BitrixAdapter {
       filter: {iblockId: Number(id(catalog.iblockId ?? catalog.id, 'ID инфоблока вариаций')), active: 'Y',
         ...(parentIds.length === 1 ? {parentId: Number(parentIds[0])} : {'@parentId': parentIds.map(Number)})},
       order: {name: 'ASC', id: 'ASC'},
-    }, 'offers');
+    }, 'offers', {maxItems: MAX_SEARCH_ITEMS});
     for (const offer of offers) {
       if (!expected.has(variationParent(offer)) || [3, 6].includes(Number(offer.type))) {
         throw new Error('Битрикс24 вернул вариацию другого основного товара. Уточните поиск.');
@@ -436,6 +518,7 @@ export class BitrixAdapter {
   }
 
   async _pricedProducts(products, parents = new Map()) {
+    if (products.size > MAX_SEARCH_ITEMS) throw broadSearchError();
     const output = [], allIds = [...products.keys()];
     for (let offset = 0; offset < allIds.length; offset += 50) {
       const chunk = allIds.slice(offset, offset + 50);
@@ -456,7 +539,12 @@ export class BitrixAdapter {
     // A parent ID expands into its offers; a concrete product ID stays exact.
     if (/^[1-9]\d*$/.test(text)) {
       const productId = id(text, 'ID товара');
-      const found = await this._readProduct(productId);
+      let found;
+      try { found = await this._readProduct(productId); }
+      catch (error) {
+        if (error.code === 'PRODUCT_NOT_FOUND') return [];
+        throw error;
+      }
       if (!found) return [await this._legacyProduct(productId)];
       if (![3, 6].includes(Number(found.raw.type))) {
         return this._pricedProducts(new Map([[productId, found]]));
@@ -483,7 +571,8 @@ export class BitrixAdapter {
           select: ['ID', 'NAME', 'PRICE', 'CURRENCY_ID', 'CATALOG_ID'],
           filter: { CATALOG_ID: Number(id(catalog.ID, 'ID каталога')), ACTIVE: 'Y', ...(text ? { '%NAME': text } : {}) },
           order: { NAME: 'ASC', ID: 'ASC' },
-        });
+        }, null, {maxItems: MAX_SEARCH_ITEMS});
+        if (products.length + rows.length > MAX_SEARCH_ITEMS) throw broadSearchError();
         for (const product of rows) products.push(await this._legacyProduct(id(product.ID, 'ID товара')));
       }
       return [...new Map(products.map(product => [product.id, product])).values()];
@@ -497,7 +586,7 @@ export class BitrixAdapter {
         select: ['id', 'iblockId', 'name', 'type', 'active', ...(offers ? ['parentId'] : [])],
         filter: { iblockId: Number(id(catalog.iblockId ?? catalog.id, 'ID инфоблока')), active: 'Y', ...(text ? { '%name': text } : {}) },
         order: { name: 'ASC', id: 'ASC' },
-      }, key);
+      }, key, {maxItems: MAX_SEARCH_ITEMS});
       for (const row of rows) {
         if (row.active === 'N') continue;
         if ([3, 6].includes(Number(row.type))) { parents.set(id(row.id, 'ID основного товара'), row); continue; }
@@ -509,7 +598,7 @@ export class BitrixAdapter {
             select: ['id', 'iblockId', 'name', 'type', 'active'],
             filter: {iblockId: Number(id(catalog.iblockId ?? catalog.id, 'ID инфоблока')), active: 'Y', ...(text ? {'%name': text} : {})},
             order: {name: 'ASC', id: 'ASC'},
-          }, 'units');
+          }, 'units', {maxItems: MAX_SEARCH_ITEMS});
           for (const head of heads) if (head.active !== 'N') parents.set(id(head.id, 'ID основного товара'), head);
         } catch (error) { if (!unavailable(error)) throw error; }
       }

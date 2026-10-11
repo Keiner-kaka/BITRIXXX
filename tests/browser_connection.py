@@ -53,7 +53,7 @@ def diagnostics(frame):
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True, executable_path='/usr/bin/chromium', args=['--no-sandbox'])
 
-    def scenario(named=True, delay=0, blocked=None, api_result=None, suspended=False):
+    def scenario(named=True, delay=0, blocked=None, api_result=None, suspended=False, api_routes=None):
         context = browser.new_context(locale='ru-RU', viewport={'width': 1450, 'height': 1100})
         page = context.new_page()
         requests, errors, held = [], [], []
@@ -75,6 +75,12 @@ with sync_playwright() as p:
 
         def api(route):
             requests.append(route.request.url.split('?')[0])
+            method = urlparse(route.request.url).path.split('/rest/', 1)[-1].removesuffix('.json')
+            if method in (api_routes or {}):
+                answer = api_routes[method]
+                route.fulfill(status=400 if 'error' in answer else 200,
+                              content_type='application/json', body=json.dumps(answer))
+                return
             if '/rest/app.option.get' in route.request.url:
                 route.fulfill(status=200, content_type='application/json', body=json.dumps({'result':None}))
                 return
@@ -154,6 +160,44 @@ with sync_playwright() as p:
     assert not errors, errors
     context.close()
     passed('SDK load timeout and retry reuse the pending script instead of overwriting it with a second copy')
+
+    context, page, frame, calls, errors, control, held = scenario(api_routes={
+        'catalog.product.get': {'error': 200040300010, 'error_description': 'private-auth-data'},
+    })
+    expect(frame.locator('#connectionBadge')).to_contain_text('подключён')
+    frame.locator('#addItemBtn').click()
+    expect(frame.locator('#productResults')).to_contain_text('Введите название или ID')
+    assert not any('/rest/catalog.' in call for call in calls)
+    frame.locator('#productQuery').fill('101')
+    frame.locator('#productSearchBtn').click()
+    expect(frame.locator('#productResults')).to_contain_text('catalog.product.get — 200040300010')
+    expect(frame.locator('#productResults')).to_contain_text('нет права на просмотр')
+    frame.locator('#closeProductBtn').click()
+    report = diagnostics(frame)
+    assert report['rest_requests'][-1]['method'] == 'catalog.product.get'
+    assert report['rest_requests'][-1]['code'] == '200040300010'
+    assert not any('/rest/crm.product.get' in call for call in calls)
+    assert not any('/rest/catalog.product.offer.get' in call for call in calls)
+    assert 'private-' not in json.dumps(report) and not errors
+    context.close()
+    passed('actual SDK preserves numeric catalog permission errors and diagnostics; opening the chooser sends no unfiltered query')
+
+    context, page, frame, calls, errors, control, held = scenario(api_routes={
+        'catalog.product.get': {'error': '', 'error_description': 'product does not exist.'},
+        'catalog.product.offer.get': {'result': {'offer': {'id': 101, 'name': 'Вариация рабочего каталога', 'type': 4, 'parentId': {'value': '90'}}}},
+        'catalog.priceType.list': {'result': {'priceTypes': [{'id': 1, 'name': 'BASE', 'base': 'Y'}]}},
+        'catalog.price.list': {'result': {'prices': [{'id': 1, 'productId': 101, 'catalogGroupId': 1, 'price': 500, 'currency': 'RUB'}]}},
+    })
+    expect(frame.locator('#connectionBadge')).to_contain_text('подключён')
+    frame.locator('#addItemBtn').click()
+    frame.locator('#productQuery').fill('101')
+    frame.locator('#productSearchBtn').click()
+    expect(frame.locator('#productResults .catalog-result')).to_have_count(1)
+    expect(frame.locator('#productResults')).to_contain_text('Вариация рабочего каталога · вариация #101')
+    assert not any('/rest/crm.product.get' in call for call in calls)
+    assert not errors, errors
+    context.close()
+    passed('actual SDK handles empty missing-product codes and finds the variation with its own BASE price')
 
     browser.close()
 print(f'{len(checks)} connection browser checks passed.')

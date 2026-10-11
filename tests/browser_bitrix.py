@@ -340,6 +340,9 @@ with sync_playwright() as p:
     passed('older Disk coating lists gain the combined zinc and RAL painting option')
 
     page.locator('.item-row [data-action=choose-product]').click()
+    expect(page.locator('#productResults')).to_contain_text('Введите название или ID')
+    page.locator('#productQuery').fill('Г')
+    page.locator('#productSearchBtn').click()
     expect(page.locator('#productResults .catalog-result')).to_have_count(2)
     page.locator('#productResults .catalog-result').filter(has_text='НФГ-6,0-02').click()
     expect(page.locator('.item-row [data-field=quantity]')).to_have_value('2')
@@ -426,6 +429,8 @@ with sync_playwright() as p:
     first.locator('[data-field=fasteners]').fill('50')
     assert money(page.locator('#grandTotal').inner_text()) == '6327,60'
     page.locator('#addItemBtn').click()
+    page.locator('#productQuery').fill('Г')
+    page.locator('#productSearchBtn').click()
     expect(page.locator('#productResults .catalog-result')).to_have_count(2)
     page.locator('#productResults .catalog-result').filter(has_text='ОГК-6').click()
     expect(page.locator('.item-row')).to_have_count(2)
@@ -600,7 +605,8 @@ with sync_playwright() as p:
     vp.goto(BASE,wait_until='networkidle')
     expect(vp.locator('#dealBadge')).to_contain_text('1048')
     vp.locator('#addItemBtn').click()
-    expect(vp.locator('#productResults .catalog-result')).to_have_count(4)
+    expect(vp.locator('#productResults')).to_contain_text('Введите название или ID')
+    assert not vp.evaluate("window.__pilotMock.calls.some(call=>call.method==='catalog.catalog.list')")
     vp.locator('#productQuery').fill('Опора серии VAR')
     vp.locator('#productSearchBtn').click()
     expect(vp.locator('#productResults .catalog-result')).to_have_count(2)

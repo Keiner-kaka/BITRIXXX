@@ -14,8 +14,13 @@ function sdkMock(routes, placement = { placement: 'CRM_DEAL_DETAIL_TAB', options
         const route = routes[method];
         const result = typeof route === 'function' ? route(params, page) : route;
         const outcome = result ?? { error: 'ERROR_METHOD_NOT_FOUND' };
+        const hasError = Object.hasOwn(outcome, 'error');
+        // Match the official BX24 ajaxError shape, including numeric and empty codes.
+        const details = typeof outcome.error === 'string'
+          ? {error: outcome.error, error_description: outcome.description ?? ''} : outcome.error;
         queueMicrotask(() => consumer({
-          error: () => outcome.error ? { status: 400, ex: { error: outcome.error, error_description: outcome.description ?? '' } } : false,
+          error: () => hasError ? {status: 400, ex: details, getError: () => details} : false,
+          answer: hasError ? {error: outcome.error, error_description: outcome.description ?? ''} : {result: outcome.data},
           error_description: () => outcome.description ?? '',
           data: () => outcome.pages ? outcome.pages[page] : outcome.data,
           more: () => Boolean(outcome.pages && page + 1 < outcome.pages.length),
@@ -197,6 +202,81 @@ test('modern offer ID lookup validates the returned ID and obtains actual base p
   assert.deepEqual(await api.getProduct('101'), { id: '101', name: 'Вариация А', basePrice: 38600, currency: 'RUB', verified: true, source: 'catalog.product.offer.get', isVariation: true, parentProductId: '' });
 });
 
+test('empty and numeric zero missing-product errors allow lookup of the concrete variation', async () => {
+  for (const error of ['', 0]) {
+    const routes = productRoutes();
+    routes['catalog.product.get'] = {error, description: 'product does not exist.'};
+    routes['catalog.product.offer.get'] = {data: {offer: {id: 101, name: 'Вариация', type: 4, parentId: 90}}};
+    const {api, sdk} = await adapter(routes);
+    assert.equal((await api.searchProducts('101'))[0].parentProductId, '90');
+    assert.equal(sdk.calls.some(call => call.method === 'crm.product.get'), false);
+  }
+});
+
+test('unknown ID returns no matches and never falls back to a misleading legacy error', async () => {
+  const routes = Object.fromEntries(['catalog.product.get', 'catalog.product.offer.get', 'catalog.product.sku.get']
+    .map(method => [method, {error: '', description: 'product does not exist.'}]));
+  const {api, sdk} = await adapter(routes);
+  assert.deepEqual(await api.searchProducts('999'), []);
+  await assert.rejects(api.getProduct('999'), error => error.code === 'PRODUCT_NOT_FOUND');
+  assert.equal(sdk.calls.some(call => call.method === 'crm.product.get'), false);
+});
+
+test('ID lookup stops on access, limits, fatal errors or invalid responses and retains the actual method', async () => {
+  for (const failure of [
+    {error: 200040300010, description: 'Access Denied'},
+    {error: 'QUERY_LIMIT_EXCEEDED', description: 'private-auth-data'},
+    {error: 0, description: 'fatal error private-auth-data'},
+    {data: {product: {id: 999, name: 'Другой товар'}}},
+  ]) {
+    const {api, sdk} = await adapter({'catalog.product.get': failure});
+    await assert.rejects(api.searchProducts('101'), error => error.message.includes('catalog.product.get')
+      && !error.message.includes('private-auth-data') && !error.message.includes('crm.product.get'));
+    assert.equal(sdk.calls.length, 1);
+    assert.equal(api.diagnostics()[0].state, failure.data ? 'success' : 'error');
+    assert.equal(JSON.stringify(api.diagnostics()).includes('private-auth-data'), false);
+  }
+});
+
+test('one ID lookup timeout stops immediately without three more requests', async () => {
+  const {api, sdk} = await adapter({}, {timeoutMs: 10});
+  sdk.callMethod = (method, params) => sdk.calls.push({method, params});
+  await assert.rejects(api.searchProducts('101'), error => error.code === 'REQUEST_TIMEOUT');
+  assert.equal(sdk.calls.length, 1);
+  assert.equal(api.diagnostics()[0].code, 'REQUEST_TIMEOUT');
+});
+
+test('legacy ID lookup is used only when all modern methods are unavailable', async () => {
+  const {api, sdk} = await adapter({
+    'crm.product.get': {data: {ID: '101', NAME: 'Старый каталог', PRICE: 10, CURRENCY_ID: 'RUB'}},
+  });
+  assert.equal((await api.searchProducts('101'))[0].basePrice, 10);
+  assert.deepEqual(sdk.calls.slice(0, 4).map(call => call.method),
+    ['catalog.product.get', 'catalog.product.offer.get', 'catalog.product.sku.get', 'crm.product.get']);
+});
+
+test('large catalog searches stop pagination before price loading and diagnostics expose only counters', async () => {
+  let pages = 0;
+  const {api, sdk} = await adapter({
+    'catalog.catalog.list': {data: {catalogs: [{id: 7, iblockId: 7}]}},
+    'catalog.product.list': (_, page) => {
+      pages++;
+      return {pages: Array.from({length: 30}, () => ({products: Array.from({length: 50}, (__, index) => ({
+        id: page * 50 + index + 1, name: 'Private product name', type: 1,
+      }))}))};
+    },
+  });
+  await assert.rejects(api.searchProducts('Private'), error => error.code === 'CATALOG_SEARCH_TOO_BROAD');
+  assert.equal(pages, 11);
+  assert.equal(sdk.calls.some(call => call.method.startsWith('catalog.price')), false);
+  const trace = api.diagnostics().at(-1);
+  assert.equal(trace.pages, 11);
+  assert.equal(trace.items, 550);
+  assert.equal(JSON.stringify(api.diagnostics()).includes('Private'), false);
+  for (let index = 0; index < 25; index++) await api.call('catalog.catalog.list');
+  assert.equal(api.diagnostics().length, 20);
+});
+
 function variationRoutes() {
   const heads = [
     {id: 401, iblockId: 7, name: 'Опора семейство', type: 3, active: 'Y'},
@@ -214,8 +294,14 @@ function variationRoutes() {
     'catalog.product.list': {data: {products: []}},
     'catalog.product.sku.list': params => ({data: {units: heads.filter(row => matches(row, params.filter))}}),
     'catalog.product.get': {error:'ERROR_NOT_FOUND'},
-    'catalog.product.sku.get': params => ({data: {sku: heads.find(row => row.id === params.id)}}),
-    'catalog.product.offer.get': params => ({data: {offer: offers.find(row => row.id === params.id)}}),
+    'catalog.product.sku.get': params => {
+      const sku = heads.find(row => row.id === params.id);
+      return sku ? {data: {sku}} : {error: '', description: 'product does not exist.'};
+    },
+    'catalog.product.offer.get': params => {
+      const offer = offers.find(row => row.id === params.id);
+      return offer ? {data: {offer}} : {error: 0, description: 'product does not exist.'};
+    },
     'catalog.product.offer.list': params => ({data: {offers: offers.filter(row => {
       const parentIds = params.filter['@parentId'] || (params.filter.parentId ? [params.filter.parentId] : null);
       return matches(row, params.filter) && (!parentIds || parentIds.includes(Number(variationParentValue(row))));
