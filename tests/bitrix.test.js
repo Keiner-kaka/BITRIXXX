@@ -91,6 +91,34 @@ test('API errors cannot disclose auth URLs or descriptions; catalog mutations ar
   assert.equal(sdk.calls.length, 1);
 });
 
+test('SDK arriving after adapter construction is picked up during init', async () => {
+  const previous = globalThis.BX24;
+  try {
+    delete globalThis.BX24;
+    const api = new BitrixAdapter();
+    globalThis.BX24 = sdkMock({});
+    assert.deepEqual(await api.init(), {connected: true, dealId: '12'});
+  } finally {
+    if (previous === undefined) delete globalThis.BX24;
+    else globalThis.BX24 = previous;
+  }
+});
+
+test('init timeout is recoverable and a stale callback cannot override retry', async () => {
+  let first;
+  const sdk = sdkMock({});
+  sdk.init = callback => { first = callback; };
+  const api = new BitrixAdapter({sdk, initTimeoutMs: 5});
+  assert.deepEqual(await api.init(), {connected: false, dealId: null});
+  assert.equal(api.connectionError.code, 'INIT_TIMEOUT');
+  sdk.init = callback => queueMicrotask(callback);
+  assert.deepEqual(await api.init(), {connected: true, dealId: '12'});
+  first();
+  assert.equal(api.connected, true);
+  assert.equal(api.connectionError, null);
+  assert.deepEqual(sdk.calls, []);
+});
+
 test('search discovers catalog IDs, paginates products/offers/prices and uses the explicit BASE group', async () => {
   const routes = {
     ...productRoutes(),

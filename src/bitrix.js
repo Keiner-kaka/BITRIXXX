@@ -2,6 +2,7 @@
 import { parseNumber } from './calculator.js';
 
 const ALLOWED_METHODS = new Set([
+  'app.info',
   'crm.deal.get', 'crm.deal.productrows.get', 'crm.deal.productrows.set',
   'crm.item.productrow.set', 'crm.company.get', 'crm.contact.get',
   'crm.catalog.list', 'crm.product.list', 'crm.product.get',
@@ -164,23 +165,37 @@ export class BitrixAdapter {
     this.handlerUrl = options.handlerUrl ?? null;
     this.placementContext = options.placementContext ?? globalThis.B24_PLACEMENT_CONTEXT;
     this.timeoutMs = options.timeoutMs ?? 20000;
-    this.initTimeoutMs = options.initTimeoutMs ?? 2500;
+    this.initTimeoutMs = options.initTimeoutMs ?? 15000;
     this.connected = false;
+    this.connectionError = null;
     this.dealId = null;
     this._catalogs = null;
     this._basePriceType = null;
   }
 
   async init() {
-    if (!this.sdk?.init || !this.sdk?.callMethod) return { connected: false, dealId: null };
+    this.connected = false;
+    this.dealId = null;
+    this.connectionError = null;
+    this.sdk ??= globalThis.BX24;
+    if (!this.sdk?.init || !this.sdk?.callMethod) {
+      this.connectionError = {code: 'SDK_UNAVAILABLE', message: 'Библиотека BX24 недоступна. Проверьте диагностику подключения в настройках.'};
+      return { connected: false, dealId: null };
+    }
     return new Promise(resolve => {
       let settled = false;
-      const timer = setTimeout(() => finish(false), this.initTimeoutMs);
-      const finish = connected => {
+      const timer = setTimeout(() => finish(false, 'INIT_TIMEOUT'), this.initTimeoutMs);
+      const finish = (connected, code = 'INIT_FAILED') => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         this.connected = connected;
+        if (!connected) this.connectionError = {
+          code,
+          message: code === 'INIT_TIMEOUT'
+            ? `Библиотека BX24 загружена, но портал не ответил на запрос контекста за ${Math.ceil(this.initTimeoutMs / 1000)} секунд. Повторите подключение; при повторной ошибке скопируйте диагностику из настроек.`
+            : 'Не удалось инициализировать BX24. Проверьте диагностику подключения в настройках.',
+        };
         if (connected) {
           try {
             const placement = this.sdk.placement?.info?.();
@@ -204,7 +219,7 @@ export class BitrixAdapter {
   _guard(method) {
     if (!ALLOWED_METHODS.has(method)) throw new Error(`Метод ${method} не разрешён в прототипе. Каталог доступен только для чтения.`);
     if (!this.connected || !this.sdk?.callMethod) {
-      throw new Error('Нет соединения с Bitrix24. Откройте приложение внутри портала.');
+      throw new Error(this.connectionError?.message || 'Нет соединения с Битрикс24. Проверьте диагностику подключения в настройках.');
     }
   }
 

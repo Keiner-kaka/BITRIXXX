@@ -62,6 +62,7 @@ MOCK = r"""
       m.calls.push({method,params:structuredClone(params)});
       let data, error;
       switch (method) {
+        case 'app.info': data={ID:'99',INSTALLED:true}; break;
         case 'crm.deal.get': data={ID:'1048',TITLE:'Пилот КП',COMPANY_ID:1,CURRENCY_ID:'RUB',CATEGORY_ID:0}; break;
         case 'crm.company.get': data={ID:'1',TITLE:'ООО «Пилот»'}; break;
         case 'crm.deal.productrows.get': data=structuredClone(m.dealRows); break;

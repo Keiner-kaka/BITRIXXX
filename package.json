@@ -1,12 +1,12 @@
 {
   "name": "yuzm-kp-prototype",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "private": true,
   "type": "module",
   "scripts": {
     "start": "python3 -m http.server 8080 --bind 127.0.0.1",
     "package": "python3 scripts/package.py",
     "test": "node --test tests/*.test.js",
-    "check": "node --check src/app.js && node --check src/calculator.js && node --check src/bitrix.js"
+    "check": "node --check src/app.js && node --check src/calculator.js && node --check src/bitrix.js && node --check src/sdk-loader.js"
   }
 }

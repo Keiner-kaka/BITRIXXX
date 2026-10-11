@@ -8,6 +8,7 @@ const uid = () => crypto.randomUUID();
 const adapter = new BitrixAdapter();
 const STORE = 'yuzm-kp-prototype-v1';
 let config, calculation, state, metalPrices = null, connected = false, busy = false, chosenRow = null;
+let connecting = false, connectionCode = 'NOT_STARTED';
 let catalogProducts = clone(demoProducts), priceMeta = {source: 'demo'}, metalPriceMeta = {source: 'demo'};
 let templates = [], templatesLoaded = false;
 let previewFingerprint = null;
@@ -569,7 +570,7 @@ function chooseProduct(product) {
   status('Товар добавлен в черновик КП. Каталог и сделка не изменены.', 'success');
 }
 async function connectDeal(id) {
-  if (!connected) throw new Error('Откройте приложение внутри Bitrix24.');
+  if (!connected) throw new Error(adapter.connectionError?.message || 'Соединение с Битрикс24 не установлено. Проверьте диагностику подключения в настройках.');
   if (!/^[1-9]\d*$/.test(String(id))) throw new Error('Укажите ID сделки.');
   const deal = await adapter.loadDeal(id);
   const scope = 'bitrix-' + (window.BX24?.getDomain?.() || window.location.host) + '-deal-' + id;
@@ -721,6 +722,18 @@ function bindEvents() {
     }
   });
   $('settingsBtn').addEventListener('click', () => { settingsToForm(); openDialog('settingsDialog'); });
+  $('retryConnectionBtn').addEventListener('click', () => connectPortal());
+  $('checkConnectionBtn').addEventListener('click', () => connectPortal());
+  $('copyConnectionDiagnosticsBtn').addEventListener('click', async () => {
+    updateConnectionDiagnostics();
+    try {
+      await navigator.clipboard.writeText($('connectionDiagnostics').value);
+      settingsMessage('Диагностика скопирована. Токены и ключи в неё не включены.');
+    } catch {
+      $('connectionDiagnostics').focus(); $('connectionDiagnostics').select();
+      settingsMessage('Диагностика выделена. Нажмите Ctrl+C для копирования.');
+    }
+  });
   $('settingsForm').addEventListener('submit', e => {
     e.preventDefault();
     try { keepSettings(); closeDialog('settingsDialog'); render(); status('Настройки сохранены.', 'success'); }
@@ -753,6 +766,73 @@ function bindEvents() {
   for (const name of ['Settings', 'History', 'Product', 'Quote']) $('close' + name + 'Btn').addEventListener('click', () => closeDialog(name.toLowerCase() + 'Dialog'));
   $('printBtn').addEventListener('click', () => window.print());
 }
+function updateConnectionDiagnostics() {
+  const diagnostics = window.YUZM_BX24?.diagnostics?.() || {sdk_available: Boolean(window.BX24?.init)};
+  $('connectionDiagnostics').value = JSON.stringify({
+    app_version: document.querySelector('meta[name="application-version"]')?.content || 'unknown',
+    ...diagnostics,
+    connection_code: connectionCode,
+    connected,
+  }, null, 2);
+}
+function connectionMessage(message, waiting = false) {
+  $('connectionPanel').hidden = connected;
+  $('connectionMessage').textContent = message;
+  $('connectionSummary').textContent = message;
+  $('retryConnectionBtn').disabled = waiting;
+  $('checkConnectionBtn').disabled = waiting;
+  updateConnectionDiagnostics();
+}
+async function connectPortal() {
+  if (connecting) return;
+  connecting = true;
+  connectionCode = 'CONNECTING';
+  connectionMessage('Подключение к Битрикс24…', true);
+  try {
+    const library = window.YUZM_BX24 ? await window.YUZM_BX24.load() : {sdk: window.BX24};
+    if (!library.sdk) {
+      adapter.connected = connected = false;
+      adapter.connectionError = {code: library.code || 'SDK_UNAVAILABLE', message: library.message || 'Библиотека BX24 недоступна. Проверьте диагностику подключения в настройках.'};
+      connectionCode = adapter.connectionError.code;
+      render(); connectionMessage(adapter.connectionError.message);
+      return;
+    }
+    // The SDK may finish loading after this adapter was constructed.
+    adapter.sdk = library.sdk;
+    const connection = await adapter.init();
+    if (!connection.connected) {
+      connected = false;
+      connectionCode = adapter.connectionError.code;
+      render(); connectionMessage(adapter.connectionError.message);
+      return;
+    }
+    connectionCode = 'CHECKING_REST';
+    const info = await adapter.call('app.info');
+    if (![true, 'Y'].includes(info?.INSTALLED)) {
+      const error = new Error('Битрикс24 не подтвердил завершение установки. Проверьте карточку приложения и выполните «Переустановить».');
+      error.code = info?.INSTALLED === false || info?.INSTALLED === 'N' ? 'INSTALL_NOT_FINISHED' : 'INVALID_APP_INFO';
+      throw error;
+    }
+    connected = true;
+    connectionCode = 'CONNECTED';
+    render(); connectionMessage('Bitrix24 подключён. Доступ к REST API подтверждён.');
+    const dealId = connection.dealId || state.settings.dealId;
+    if (dealId && (state.scope === 'demo' || String(state.activeDealId) !== String(dealId))) {
+      try { await connectDeal(String(dealId)); } catch (error) { status(safeError(error), 'error'); }
+    } else if (!dealId) status('Bitrix24 подключён. Откройте вкладку сделки или укажите её ID в настройках.');
+    renderTemplates();
+  } catch (error) {
+    adapter.connected = connected = false;
+    connectionCode = error.code || 'CONNECTION_FAILED';
+    adapter.connectionError = {code: connectionCode, message: safeError(error)};
+    render(); connectionMessage(adapter.connectionError.message);
+  } finally {
+    connecting = false;
+    $('retryConnectionBtn').disabled = false;
+    $('checkConnectionBtn').disabled = false;
+    updateConnectionDiagnostics();
+  }
+}
 async function boot() {
   try {
     const prices = await fetch('data/coatings.example.json').then(r => r.json());
@@ -763,15 +843,7 @@ async function boot() {
     try { const settings = JSON.parse(localStorage.getItem(STORE + '-settings')); if (settings) state.settings = {...state.settings, ...settings}; } catch {}
     delete state.settings.documentFields; delete state.settings.relationsFileId;
     bindEvents(); render();
-    const connection = await adapter.init();
-    connected = connection.connected;
-    if (connected) {
-      $('connectionBadge').textContent = 'Bitrix24 подключён'; $('connectionBadge').classList.add('connected');
-      const dealId = connection.dealId || state.settings.dealId;
-      if (dealId) try { await connectDeal(String(dealId)); } catch (error) { status(safeError(error), 'error'); }
-      else status('Bitrix24 подключён. Откройте вкладку сделки или укажите её ID в настройках.');
-      renderTemplates();
-    }
+    await connectPortal();
   } catch (error) {
     status('Не удалось запустить калькулятор: ' + safeError(error) + '. Запускайте приложение через HTTP-сервер, а не двойным кликом по HTML.', 'error');
   }

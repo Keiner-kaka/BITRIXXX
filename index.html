@@ -4,9 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#4267e9">
+  <meta name="application-version" content="2.0.3">
   <title>ЮЗМ · Конструктор коммерческого предложения</title>
   <link rel="stylesheet" href="styles.css">
-  <script src="https://api.bitrix24.tech/api/v1/"></script>
+  <script src="src/sdk-loader.js"></script>
 </head>
 <body>
   <svg class="svg-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -36,6 +37,11 @@
           <button id="saveBtn" class="button primary" type="button"><svg class="icon"><use href="#icon-check"/></svg>Сохранить версию</button>
         </div>
       </header>
+
+      <section id="connectionPanel" class="connection-panel" aria-label="Подключение к Битрикс24" hidden>
+        <p id="connectionMessage" role="status" aria-live="polite"></p>
+        <button id="retryConnectionBtn" class="button secondary" type="button">Повторить подключение</button>
+      </section>
 
       <section class="customer-section" aria-label="Данные предложения">
         <div class="field company-field"><label for="companyName">Наименование компании</label><div class="input-with-icon"><svg class="icon"><use href="#icon-building"/></svg><input id="companyName" type="text" placeholder="Название компании" autocomplete="organization"></div></div>
@@ -116,6 +122,16 @@
     <div class="dialog-header"><div><span class="eyebrow">Конструктор КП</span><h2 id="settingsTitle">Настройки</h2></div><button id="closeSettingsBtn" class="button icon-button" type="button" aria-label="Закрыть настройки"><svg class="icon"><use href="#icon-close"/></svg></button></div>
     <form id="settingsForm">
       <div class="dialog-content">
+        <section class="settings-section" aria-labelledby="connectionSettingsTitle">
+          <h3 id="connectionSettingsTitle">Соединение с Битрикс24</h3>
+          <p id="connectionSummary" class="hint" role="status">Проверка подключения…</p>
+          <button id="checkConnectionBtn" class="button secondary" type="button">Проверить соединение</button>
+          <details><summary>Диагностика подключения</summary>
+            <p class="hint">Здесь только состояние загрузки и контекста. Токены и ключи приложения не включаются.</p>
+            <textarea id="connectionDiagnostics" rows="8" readonly aria-label="Диагностика подключения"></textarea>
+            <button id="copyConnectionDiagnosticsBtn" class="button secondary" type="button">Скопировать диагностику</button>
+          </details>
+        </section>
         <section class="settings-section"><h3>Расчёт</h3><div class="form-grid"><div class="field"><label for="formulaMode">Формула</label><select id="formulaMode"><option value="catalog">Каталог: базовая цена × К1 × К2 × К3</option><option value="excel">Excel: (цена за кг × вес × К1 × К2 × К3 + метизы) × количество</option></select></div><div class="field"><label for="roundingMode">Округление до копеек</label><select id="roundingMode"><option value="line">По сумме строки</option><option value="unit">Сначала цена единицы</option></select></div></div><p class="hint">В режиме Excel сумма строки = (цена за кг × вес одного изделия × К1 × К2 × К3 + метизы на одно изделие) × количество. К3 — коэффициент покраски и покрытия. Метизы добавляются после применения коэффициентов. Наименование покрытия подставляется в КП и не изменяет цену.</p></section>
         <section class="settings-section"><h3>Подключение к сделке Bitrix24</h3><div class="form-grid"><div class="field"><label for="dealIdInput">ID сделки</label><input id="dealIdInput" type="text" inputmode="numeric" placeholder="Например, 1048" autocomplete="off"></div><div class="field button-field"><button id="connectDealBtn" class="button secondary" type="button">Открыть данные сделки</button></div></div><p class="hint">Вкладка установленного приложения получает ID сделки автоматически. Для запросов REST используются права приложения.</p><button id="registerPlacementBtn" class="button secondary" type="button">Зарегистрировать вкладку в сделке</button></section>
         <section class="settings-section" aria-labelledby="documentSettingsTitle">

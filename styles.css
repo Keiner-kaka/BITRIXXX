@@ -21,3 +21,8 @@
 .terms-section{margin:0 25px 18px;padding:16px 17px;border:1px solid var(--line);border-radius:8px;background:#f8faff}.terms-heading{margin-bottom:14px}.terms-heading h2{font-size:12px}.terms-heading .hint{margin-top:4px}.terms-section .form-grid{align-items:start;gap:16px}.terms-section .field>label,.term-label-row label{font-size:11px;color:#536783}.term-label-row{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:25px}.term-label-row .term-preset{font-size:10px;min-height:25px;padding:3px 6px;color:var(--blue)}.terms-section textarea{font-size:12px;line-height:1.6}.payment-terms-field textarea{min-height:105px}.payment-terms-field>label[for="YuzmPaymentTerms"]{margin-top:8px}.manager-details{margin-top:18px;border-top:1px solid var(--line);padding-top:12px}.manager-details summary{cursor:pointer;color:#536783;font-size:11px;font-weight:600}.manager-details summary .hint{margin-left:8px;font-weight:400}.manager-details[open] summary{margin-bottom:12px}
 @media(max-width:1150px){.terms-section{margin-left:20px;margin-right:20px}}
 @media(max-width:560px){.terms-section{margin-left:15px;margin-right:15px;padding:14px 12px}.terms-section .form-grid{gap:13px}.term-label-row{gap:6px}.manager-details summary .hint{margin-left:5px}}
+.connection-panel { display:flex; align-items:center; gap:16px; padding:16px 20px; margin-bottom:20px; border:1px solid #d7e2f4; border-radius:12px; background:#f2f6ff; }
+.connection-panel[hidden] { display:none; }
+.connection-panel p { margin:0; flex:1; }
+#connectionDiagnostics { width:100%; margin:12px 0; font-family:monospace; }
+@media (max-width:640px) { .connection-panel { align-items:stretch; flex-direction:column; } }

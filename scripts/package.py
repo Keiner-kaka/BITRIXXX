@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / 'dist'
 RUNTIME = [
     'index.html', 'styles.css',
-    'src/app.js', 'src/calculator.js', 'src/bitrix.js', 'src/demo.js',
+    'src/app.js', 'src/calculator.js', 'src/bitrix.js', 'src/demo.js', 'src/sdk-loader.js',
     'data/coatings.example.json', 'data/metal-prices.example.json',
 ]
 
@@ -75,6 +75,7 @@ def build():
             'node_test_files_passed': 3,
             'browser_ui_checks_passed': 20,
             'browser_mock_bitrix_checks_passed': 14,
+            'browser_connection_checks_passed': 7,
             'live_bitrix_tested': False,
             'uploaded_template_preserved': True,
         },
