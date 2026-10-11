@@ -163,133 +163,130 @@ with sync_playwright() as p:
     context.close()
     passed('SDK load timeout and retry reuse the pending script instead of overwriting it with a second copy')
 
+    catalog_routes = {
+        'catalog.catalog.list': {'result': {'catalogs': [{'id': 7, 'iblockId': 7, 'productIblockId': 0}]}},
+        'catalog.product.list': {'result': {'products': [{'id': 101, 'iblockId': 7, 'name': 'Товар 101', 'type': 1}]}},
+    }
     context, page, frame, calls, errors, control, held = scenario(api_routes={
-        'catalog.product.get': {'error': 200040300010, 'error_description': 'private-auth-data'},
+        **catalog_routes,
+        'catalog.product.list': {'error': 200040300010, 'error_description': 'private-auth-data'},
     })
     expect(frame.locator('#connectionBadge')).to_contain_text('подключён')
     frame.locator('#addItemBtn').click()
-    expect(frame.locator('#productResults')).to_contain_text('Введите часть названия')
-    assert not any('/rest/catalog.' in call for call in calls)
-    frame.locator('#productQuery').fill('101')
-    frame.locator('#productSearchMode').select_option('id')
-    frame.locator('#productSearchBtn').click()
-    expect(frame.locator('#productResults')).to_contain_text('catalog.product.get — 200040300010')
-    expect(frame.locator('#productResults')).to_contain_text('нет права на просмотр')
+    expect(frame.locator('#productResults')).to_contain_text('catalog.product.list — 200040300010')
     frame.locator('#closeProductBtn').click()
     report = diagnostics(frame)
-    assert report['rest_requests'][-1]['method'] == 'catalog.product.get'
     assert report['rest_requests'][-1]['code'] == '200040300010'
-    assert not any('/rest/crm.product.get' in call for call in calls)
-    assert not any('/rest/catalog.product.offer.get' in call for call in calls)
+    assert not any('/rest/catalog.price' in call for call in calls)
     assert 'private-' not in json.dumps(report) and not errors
     context.close()
-    passed('actual SDK preserves numeric catalog permission errors and diagnostics; opening the chooser sends no unfiltered query')
+    passed('actual SDK preserves catalog access errors without leaking descriptions or loading prices')
 
+    variation = {'id': 101, 'iblockId': 8, 'name': 'Вариация рабочего каталога', 'type': 4, 'parentId': {'value': '90'}}
     context, page, frame, calls, errors, control, held = scenario(api_routes={
+        'catalog.catalog.list': {'result': {'catalogs': [{'id': 7, 'iblockId': 7, 'productIblockId': 0}, {'id': 8, 'iblockId': 8, 'productIblockId': 7}]}},
+        'catalog.product.list': {'result': {'products': []}},
+        'catalog.product.sku.list': {'result': {'units': [{'id': 90, 'iblockId': 7, 'type': 3, 'name': 'Основной товар'}]}},
+        'catalog.product.offer.list': {'result': {'offers': [variation]}},
         'catalog.product.get': {'error': '', 'error_description': 'product does not exist.'},
-        'catalog.product.offer.get': {'result': {'offer': {'id': 101, 'name': 'Вариация рабочего каталога', 'type': 4, 'parentId': {'value': '90'}}}},
+        'catalog.product.offer.get': {'result': {'offer': variation}},
         'catalog.priceType.list': {'result': {'priceTypes': [{'id': 1, 'name': 'BASE', 'base': 'Y'}]}},
         'catalog.price.list': {'result': {'prices': [{'id': 1, 'productId': 101, 'catalogGroupId': 1, 'price': 500, 'currency': 'RUB'}]}},
     })
     expect(frame.locator('#connectionBadge')).to_contain_text('подключён')
     frame.locator('#addItemBtn').click()
-    frame.locator('#productQuery').fill('101')
-    frame.locator('#productSearchMode').select_option('id')
-    frame.locator('#productSearchBtn').click()
     expect(frame.locator('#productResults .catalog-result')).to_have_count(1)
-    expect(frame.locator('#productResults')).to_contain_text('Вариация рабочего каталога · вариация #101')
+    assert not any('/rest/catalog.price' in call for call in calls)
+    frame.locator('#productResultsSelect').select_option('101')
+    frame.locator('[data-choose-catalog=productResults]').click()
+    expect(frame.locator('.item-row').last.locator('.base-price')).to_contain_text('500')
     assert not any('/rest/crm.product.get' in call for call in calls)
     assert not errors, errors
     context.close()
-    passed('actual SDK handles empty missing-product codes and finds the variation with its own BASE price')
+    passed('actual SDK verifies only the chosen variation and handles empty missing-product codes')
 
     starts = []
-    product_query = 'Опора СФГ-700'
+    name = 'Опора СФГ-700-10,0-01-ц'
     def product_pages(params):
         values = params.get('start', ['0'])
         starts.append(values)
-        # Like PHP form parsing, the last duplicate scalar wins.
         offset = int(values[-1])
-        assert params['filter[=%name]'] == ['%' + product_query + '%']
-        assert params['filter[iblockId]'] == ['7']
-        rows = [{'id': 1000 + index, 'iblockId': 7, 'type': 1,
-                 'name': product_query + '-10,0-01-ц #' + str(index)}
+        assert not any(key.startswith('filter[') and ('name]' in key or 'parentId]' in key) for key in params)
+        rows = [{'id': 1000 + index, 'iblockId': 7, 'type': 1, 'name': name + ' #' + str(index)}
                 for index in range(offset, min(offset + 50, 51))]
-        return {'result': {'products': rows}, 'total': 51,
-                **({'next': offset + 50} if offset + 50 < 51 else {})}
+        return {'result': {'products': rows}, 'total': 51, **({'next': offset + 50} if offset + 50 < 51 else {})}
 
     def product_prices(params):
-        ids = [int(value[0]) for key, value in params.items() if key.startswith('filter[%40productId]') or key.startswith('filter[@productId]')]
-        assert ids, params.keys()
-        return {'result': {'prices': [{'id': product_id, 'productId': product_id,
-                                      'catalogGroupId': 1, 'price': 57900, 'currency': 'RUB'} for product_id in ids]}}
+        ids = [int(value[0]) for key, value in params.items() if key.startswith('filter[@productId]')]
+        assert len(ids) == 1
+        return {'result': {'prices': [{'id': ids[0], 'productId': ids[0], 'catalogGroupId': 1, 'price': 57900, 'currency': 'RUB'}]}}
 
     context, page, frame, calls, errors, control, held = scenario(api_routes={
-        'catalog.catalog.list': {'result': {'catalogs': [{'id': 7, 'iblockId': 7, 'productIblockId': 0}]}},
+        **catalog_routes,
         'catalog.product.list': product_pages,
+        'catalog.product.get': lambda params: {'result': {'product': {'id': int(params['id'][0]), 'name': name, 'type': 1}}},
         'catalog.priceType.list': {'result': {'priceTypes': [{'id': 1, 'name': 'BASE', 'base': 'Y'}]}},
         'catalog.price.list': product_prices,
     })
     expect(frame.locator('#connectionBadge')).to_contain_text('подключён')
     frame.locator('#addItemBtn').click()
-    frame.locator('#productQuery').fill(product_query)
-    frame.locator('#productSearchBtn').click()
     expect(frame.locator('#productResults .catalog-result')).to_have_count(51, timeout=15000)
     assert starts == [['0'], ['50']], starts
+    for fragment in ['СФГ', '700']:
+        frame.locator('#productQuery').fill(fragment)
+        frame.locator('#productSearchBtn').click()
+        expect(frame.locator('#productResults .catalog-result')).to_have_count(51)
+        assert starts == [['0'], ['50']], starts
+    assert not any('/rest/catalog.price' in call for call in calls)
+    frame.locator('#productResultsSelect').select_option('1050')
+    frame.locator('[data-choose-catalog=productResults]').click()
+    expect(frame.locator('.item-row').last.locator('.base-price')).to_contain_text('57')
     assert not errors, errors
     context.close()
-    passed('actual SDK reads both product pages with one correct start offset and preserves the Cyrillic name filter')
+    passed('actual SDK reads both product pages once, filters locally and loads only the selected price')
 
     offer_starts = []
-    parent_name = 'Опора СФГ-700-10,0-01-ц'
-    def matching_parent(params):
-        pattern = params['filter[=%name]'][0]
-        assert pattern.startswith('%') and pattern.endswith('%')
-        head = {'id': 301, 'iblockId': 7, 'type': 3, 'name': parent_name, 'active': 'Y'}
-        return {'result': {'units': [head] if pattern[1:-1].lower() in parent_name.lower() else []}}
-
     def offer_pages(params):
         assert params['filter[iblockId]'] == ['8']
-        if 'filter[=%name]' in params:
-            assert params['filter[=%name]'][0] in ['%' + parent_name + '%', '%СФГ%', '%700%']
-            return {'result': {'offers': []}}
-        assert params['filter[parentId]'] == ['301']
+        assert not any(key.startswith('filter[') and ('parentId]' in key or 'name]' in key) for key in params)
         values = params.get('start', ['0'])
         offer_starts.append(values)
         offset = int(values[-1])
         rows = [{'id': 1000 + index, 'iblockId': 8, 'type': 4, 'active': 'Y',
-                 'parentId': {'value': '301'}, 'name': 'Исполнение #' + str(index)}
-                for index in range(offset, min(offset + 50, 51))]
-        return {'result': {'offers': rows}, 'total': 51,
-                **({'next': offset + 50} if offset + 50 < 51 else {})}
+                 'parentId': {'value': '999' if index == 549 else '301'}, 'name': 'Исполнение #' + str(index)}
+                for index in range(offset, min(offset + 50, 550))]
+        return {'result': {'offers': rows}, 'total': 550, **({'next': offset + 50} if offset + 50 < 550 else {})}
 
     context, page, frame, calls, errors, control, held = scenario(api_routes={
-        'catalog.catalog.list': {'result': {'catalogs': [{'id': 7, 'iblockId': 7, 'productIblockId': 0},
-                                                        {'id': 8, 'iblockId': 8, 'productIblockId': 7}]}},
+        'catalog.catalog.list': {'result': {'catalogs': [{'id': 7, 'iblockId': 7, 'productIblockId': 0}, {'id': 8, 'iblockId': 8, 'productIblockId': 7}]}},
         'catalog.product.list': {'result': {'products': []}},
-        'catalog.product.sku.list': matching_parent,
+        'catalog.product.sku.list': {'result': {'units': [{'id': 301, 'iblockId': 7, 'type': 3, 'name': name, 'active': 'Y'}]}},
         'catalog.product.offer.list': offer_pages,
+        'catalog.product.get': {'error': '', 'error_description': 'product does not exist.'},
+        'catalog.product.offer.get': lambda params: {'result': {'offer': {'id': int(params['id'][0]), 'name': 'Исполнение #549', 'type': 4, 'parentId': {'value': '999'}}}},
         'catalog.priceType.list': {'result': {'priceTypes': [{'id': 1, 'name': 'BASE', 'base': 'Y'}]}},
         'catalog.price.list': product_prices,
     })
     expect(frame.locator('#connectionBadge')).to_contain_text('подключён')
     frame.locator('#addItemBtn').click()
-    frame.locator('#productQuery').fill(parent_name)
-    frame.locator('#productSearchBtn').click()
-    expect(frame.locator('#productResults .catalog-result')).to_have_count(51, timeout=15000)
-    assert offer_starts == [['0'], ['50']], offer_starts
-    expect(frame.locator('#productResults')).to_contain_text('Исполнение #50 · вариация #1050')
-    expect(frame.locator('#productResults')).to_contain_text('основной товар: ' + parent_name)
+    expect(frame.locator('#productResults .catalog-result')).to_have_count(550, timeout=20000)
+    assert offer_starts == [[str(index)] for index in range(0,550,50)], offer_starts
+    expect(frame.locator('#productResults')).to_contain_text('Исполнение #549')
     for fragment in ['СФГ', '700']:
-        offer_starts.clear()
         frame.locator('#productQuery').fill(fragment)
         frame.locator('#productSearchBtn').click()
-        expect(frame.locator('#productResults .catalog-result')).to_have_count(51, timeout=15000)
-        assert offer_starts == [['0'], ['50']], offer_starts
-    assert not any('/rest/catalog.product.get' in call for call in calls)
+        expect(frame.locator('#productResults .catalog-result')).to_have_count(549)
+    assert len(offer_starts) == 11
+    frame.locator('#productQuery').fill('1549')
+    frame.locator('#productSearchMode').select_option('id')
+    expect(frame.locator('#productResults .catalog-result')).to_have_count(1)
+    assert not any('/rest/catalog.price' in call for call in calls)
+    frame.locator('#productResultsSelect').select_option('1549')
+    frame.locator('[data-choose-catalog=productResults]').click()
+    expect(frame.locator('.item-row').last.locator('[data-field=productId]')).to_have_value('1549')
     assert not errors, errors
     context.close()
-    passed('actual SDK searches the full parent name, Cyrillic and numeric fragments and reads 51 variations once with their own names, IDs and prices')
+    passed('actual SDK exposes all 550 variations, including an unrelated parent, and locally filters without a 500 limit')
 
     browser.close()
 print(f'{len(checks)} connection browser checks passed.')

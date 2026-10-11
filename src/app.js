@@ -250,7 +250,7 @@ function assignProduct(row, product) {
 }
 function renderRows() {
   const nodes = draft().rows.map(row => {
-    const nameOptions = catalogProducts.map(p => ({value: String(p.id), text: productLabel(p)}));
+    const nameOptions = catalogProducts.map(p => ({value: String(p.id), text: productLabel(String(p.id) === String(row.productId) ? {...p, name: row.productName} : p)}));
     if (!nameOptions.some(p => p.value === String(row.productId))) nameOptions.unshift({value: String(row.productId), text: row.productName || 'Товар не выбран'});
     const productSelect = select(nameOptions, String(row.productId), {'data-field': 'productId', 'aria-label': 'Товар позиции'});
     const baseText = element('span', {class: 'base-price', text: formatMoney(row.basePrice, row.currency || config.currency)});
@@ -311,6 +311,9 @@ function recalc() {
   $('createQuoteBtn').disabled = busy || managerLoading || !calculation.valid;
   $('applyDealBtn').disabled = !connected || !calculation.valid || busy || managerLoading;
   $('downloadBtn').disabled = busy || managerLoading;
+  for (const button of document.querySelectorAll('[data-choose-catalog]')) {
+    button.disabled = busy || !$(button.dataset.chooseCatalog + 'Select')?.value;
+  }
   for (const id of ['variantSelect', 'newVariantBtn', 'duplicateVariantBtn', 'connectDealBtn', 'resetDemoBtn']) $(id).disabled = busy;
   renderDocumentControls();
   renderManagerControls();
@@ -650,47 +653,87 @@ async function importFile(event) {
   } catch (error) { settingsMessage(safeError(error)); }
   finally { event.target.value = ''; }
 }
-async function searchProducts(query, target) {
+async function searchProducts(query, target, refresh = false) {
+  const scope = state.scope, wasConnected = connected;
   const by = $(target === 'productResults' ? 'productSearchMode' : 'catalogSearchMode').value;
   const request = (productSearchRequests.get(target) || 0) + 1;
   productSearchRequests.set(target, request);
-  if (connected && !query.trim()) {
-    $(target).textContent = by === 'id'
-      ? 'Введите ID товара или вариации и нажмите «Найти».'
-      : 'Введите часть названия, например СФГ или 700, и нажмите «Найти».';
-    return;
-  }
-  $(target).textContent = 'Поиск…';
+  const current = () => productSearchRequests.get(target) === request && state.scope === scope && connected === wasConnected;
+  $(target).textContent = connected ? 'Загрузка каталога…' : 'Поиск…';
   try {
-    const matches = connected
-      ? await adapter.searchProducts(query, {by})
-      : demoProducts.filter(p => by === 'id' ? p.id === query : p.name.toLocaleLowerCase('ru').includes(query.toLocaleLowerCase('ru')));
-    if (productSearchRequests.get(target) !== request) return;
-    $(target).replaceChildren(...matches.map(product => element('button', {
-      type: 'button', class: 'catalog-result', 'data-product': JSON.stringify(product),
+    const entries = connected ? await adapter.listCatalogEntries({refresh, onProgress: count => {
+      if (current()) $(target).textContent = 'Загрузка каталога: прочитано ' + count + ' записей…';
+    }}) : demoProducts;
+    if (!current()) return;
+    const text = query.trim().toLocaleLowerCase('ru');
+    let searchId;
+    if (text && by === 'id') {
+      if (!/^\d+$/.test(text) || !Number.isSafeInteger(Number(text)) || Number(text) <= 0) throw new Error('ID товара: требуется положительное целое число.');
+      searchId = String(Number(text));
+    }
+    const matches = entries.filter(product => !text || (by === 'id'
+      ? product.id === searchId || product.parentProductId === searchId
+      : (product.name + '\n' + (product.parentProductName || '')).toLocaleLowerCase('ru').includes(text)));
+    if (connected) {
+      catalogProducts = entries.map(entry => ({...entry}));
+      for (const node of document.querySelectorAll('.item-row [data-field=productId]')) {
+        const row = draft().rows.find(item => item.id === node.closest('[data-row-id]')?.dataset.rowId);
+        if (!row) continue;
+        const items = catalogProducts.map(product => option(product.id,
+          productLabel(product.id === String(row.productId) ? {...product, name: row.productName} : product)));
+        if (!catalogProducts.some(product => product.id === String(row.productId))) items.unshift(option(row.productId, row.productName));
+        node.replaceChildren(...items); node.value = String(row.productId);
+      }
+    }
+    const options = matches.map(product => element('option', {
+      value: product.id, class: 'catalog-result', 'data-product': JSON.stringify(product),
       text: productLabel(product) + (product.parentProductName ? ' · основной товар: ' + product.parentProductName : '')
-        + ' · ' + formatMoney(product.basePrice, product.currency) + ' · #' + product.id
-    })));
+        + ' · #' + product.id
+    }));
+    const picker = element('select', {id: target + 'Select', 'aria-label': 'Товары и вариации каталога'}, [
+      option('', 'Выберите товар или вариацию'), ...options,
+    ]);
+    const button = element('button', {type: 'button', class: 'button primary', 'data-choose-catalog': target,
+      text: target === 'productResults' && chosenRow ? 'Выбрать' : 'Добавить', disabled: 'disabled'});
+    picker.addEventListener('change', () => { button.disabled = !picker.value || busy; });
+    $(target).replaceChildren(element('p', {class: 'hint', text: 'Найдено ' + matches.length + ' из ' + entries.length + '. Цена загрузится после нажатия «' + button.textContent + '».'}),
+      element('div', {class: 'catalog-picker'}, [picker, button]), element('p', {id: target + 'Message', class: 'hint', role: 'status'}));
     if (!matches.length) $(target).append(element('p', {class: 'empty-state', text: 'Товары и активные вариации не найдены. Проверьте запрос и выбранный способ поиска: по названию или по ID.'}));
-  } catch (error) { if (productSearchRequests.get(target) === request) $(target).textContent = safeError(error); }
+  } catch (error) { if (current()) $(target).textContent = safeError(error); }
   finally { updateConnectionDiagnostics(); }
 }
-function chooseProduct(product) {
-  if (product.currency !== config.currency) throw new Error('Валюта товара не совпадает с валютой КП. Автоматическая конвертация не выполняется.');
-  product.source = connected ? 'catalog' : 'demo';
-  const cached = catalogProducts.findIndex(p => String(p.id) === String(product.id));
-  if (cached >= 0) catalogProducts[cached] = product;
-  else catalogProducts.push(product);
-  if (chosenRow) {
-    const row = draft().rows.find(r => r.id === chosenRow);
-    if (!row) throw new Error('Позиция уже удалена.');
-    assignProduct(row, product);
-  } else {
-    const row = newRow(product); assignProduct(row, product); draft().rows.push(row);
+async function chooseProduct(entry, messageTarget = '') {
+  if (busy) return;
+  const scope = state.scope, variantId = state.selectedVariantId, targetRow = chosenRow;
+  const message = messageTarget && $(messageTarget + 'Message');
+  try {
+    busy = true; recalc();
+    if (message) { message.className = 'hint'; message.textContent = 'Загрузка цены выбранной позиции…'; }
+    const product = connected ? await adapter.getProduct(entry.id) : {...entry};
+    if (state.scope !== scope || state.selectedVariantId !== variantId) return;
+    if (product.parentProductId === entry.parentProductId && entry.parentProductName) product.parentProductName = entry.parentProductName;
+    if (product.currency !== config.currency) throw new Error('Валюта товара не совпадает с валютой КП. Автоматическая конвертация не выполняется.');
+    product.source = connected ? 'catalog' : 'demo';
+    const cached = catalogProducts.findIndex(p => String(p.id) === String(product.id));
+    if (cached >= 0) catalogProducts[cached] = product;
+    else catalogProducts.push(product);
+    if (targetRow) {
+      const row = draft().rows.find(r => r.id === targetRow);
+      if (!row) throw new Error('Позиция уже удалена.');
+      assignProduct(row, product);
+    } else {
+      const row = newRow(product); assignProduct(row, product); draft().rows.push(row);
+    }
+    renderRows(); renderDocuments();
+    if ($('productDialog').open) closeDialog('productDialog');
+    status('Товар добавлен в черновик КП. Каталог и сделка не изменены.', 'success');
+    if (message) message.textContent = 'Позиция добавлена в расчёт.';
+  } catch (error) {
+    if (state.scope !== scope || state.selectedVariantId !== variantId) return;
+    renderRows(); status(safeError(error), 'error');
+    if (message) { message.className = 'inline-error'; message.textContent = safeError(error); }
   }
-  renderRows(); renderDocuments();
-  if ($('productDialog').open) closeDialog('productDialog');
-  status('Товар добавлен в черновик КП. Каталог и сделка не изменены.', 'success');
+  finally { busy = false; recalc(); }
 }
 async function connectDeal(id) {
   if (!connected) throw new Error(adapter.connectionError?.message || 'Соединение с Битрикс24 не установлено. Проверьте диагностику подключения в настройках.');
@@ -808,12 +851,13 @@ function bindEvents() {
     row[field] = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
     recalc();
   });
-  $('itemsBody').addEventListener('change', e => {
+  $('itemsBody').addEventListener('change', async e => {
     const field = e.target.dataset.field; if (!field || e.target.tagName !== 'SELECT') return;
     const row = draft().rows.find(r => r.id === e.target.closest('[data-row-id]')?.dataset.rowId); if (!row) return;
     if (field === 'productId') {
       const product = catalogProducts.find(p => String(p.id) === e.target.value); if (!product) return;
-      assignProduct(row, product);
+      chosenRow = row.id;
+      await chooseProduct(product);
       } else row[field] = e.target.value;
     renderRows(); renderDocuments();
   });
@@ -821,15 +865,18 @@ function bindEvents() {
     const action = e.target.closest('[data-action]')?.dataset.action; if (!action) return;
     const rowId = e.target.closest('[data-row-id]')?.dataset.rowId;
     if (action === 'remove') { draft().rows = draft().rows.filter(r => r.id !== rowId); renderRows(); renderDocuments(); }
-    if (action === 'choose-product') { chosenRow = rowId; openDialog('productDialog'); searchProducts('', 'productResults'); }
+    if (action === 'choose-product') { chosenRow = rowId; $('productQuery').value = ''; $('productSearchMode').value = 'name'; $('productQuery').placeholder = 'Название или часть названия'; openDialog('productDialog'); searchProducts('', 'productResults'); }
   });
-  $('addItemBtn').addEventListener('click', () => { chosenRow = null; openDialog('productDialog'); searchProducts('', 'productResults'); });
+  $('addItemBtn').addEventListener('click', () => { chosenRow = null; $('productQuery').value = ''; $('productSearchMode').value = 'name'; $('productQuery').placeholder = 'Название или часть названия'; openDialog('productDialog'); searchProducts('', 'productResults'); });
   $('productSearchBtn').addEventListener('click', () => searchProducts($('productQuery').value.trim(), 'productResults'));
   $('productQuery').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); searchProducts(e.target.value.trim(), 'productResults'); } });
   for (const id of ['productResults', 'catalogResults']) $(id).addEventListener('click', e => {
-    const raw = e.target.closest('[data-product]')?.dataset.product;
-    if (raw) try { chooseProduct(JSON.parse(raw)); } catch (error) { status(safeError(error), 'error'); }
+    const target = e.target.closest('[data-choose-catalog]')?.dataset.chooseCatalog;
+    const raw = target && $(target + 'Select').selectedOptions[0]?.dataset.product;
+    if (raw) chooseProduct(JSON.parse(raw), target);
   });
+  $('refreshCatalogBtn').addEventListener('click', () => searchProducts($('productQuery').value.trim(), 'productResults', true));
+  $('refreshCatalogSettingsBtn').addEventListener('click', () => { chosenRow = null; searchProducts($('catalogQuery').value.trim(), 'catalogResults', true); });
   $('searchCatalogBtn').addEventListener('click', () => { chosenRow = null; searchProducts($('catalogQuery').value.trim(), 'catalogResults'); });
   for (const [modeId, queryId, resultsId] of [['productSearchMode', 'productQuery', 'productResults'], ['catalogSearchMode', 'catalogQuery', 'catalogResults']]) {
     $(modeId).addEventListener('change', () => {

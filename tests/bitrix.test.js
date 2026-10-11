@@ -344,6 +344,51 @@ function variationRoutes() {
 
 function variationParentValue(row) { return row.parentId?.value ?? row.parentId; }
 
+test('full catalog index includes every offer without parent filters or eager prices and coalesces reads', async () => {
+  const routes = variationRoutes();
+  const offers = Array.from({length: 750}, (_, index) => ({id: 1000 + index, iblockId: 8,
+    name: 'Исполнение ' + index, type: 4, active: 'Y', parentId: {value: index === 0 ? '999' : '401'}}));
+  routes['catalog.product.offer.list'] = {pages: Array.from({length: 15}, (_, page) => ({offers: offers.slice(page * 50, page * 50 + 50)}))};
+  const {api, sdk} = await adapter(routes);
+  const [first, second] = await Promise.all([api.listCatalogEntries(), api.listCatalogEntries()]);
+  assert.equal(first.length, 750);
+  assert.equal(second.length, 750);
+  assert.equal(first.some(entry => entry.id === '1749'), true);
+  assert.equal(first.find(entry => entry.id === '1000').parentProductName, undefined);
+  assert.equal(first.find(entry => entry.id === '1001').parentProductName, 'Опора семейство');
+  assert.equal(first.every(entry => entry.verified === false && entry.basePrice === undefined), true);
+  assert.equal(sdk.calls.some(call => call.method.startsWith('catalog.price') || call.method.endsWith('.get')), false);
+  assert.equal(sdk.calls.filter(call => call.method === 'catalog.product.offer.list').length, 1);
+  assert.equal(sdk.calls.some(call => call.params.filter?.parentId || call.params.filter?.['@parentId']), false);
+  first[0].name = 'Changed by caller';
+  assert.notEqual((await api.listCatalogEntries())[0].name, 'Changed by caller');
+  await api.listCatalogEntries({refresh: true});
+  assert.equal(sdk.calls.filter(call => call.method === 'catalog.product.offer.list').length, 2);
+});
+
+test('unfamiliar optional parent metadata does not block a verified offer or the full index', async () => {
+  const routes = variationRoutes();
+  const offer = {id: 411, iblockId: 8, name: 'Без подтверждённой связи', type: 4, parentId: {value: ['401', '402']}};
+  routes['catalog.product.offer.list'] = {data: {offers: [offer]}};
+  routes['catalog.product.offer.get'] = {data: {offer}};
+  const {api} = await adapter(routes);
+  assert.equal((await api.listCatalogEntries())[0].parentProductId, '');
+  const selected = await api.getProduct(411);
+  assert.equal(selected.id, '411');
+  assert.equal(selected.basePrice, 133);
+  assert.equal(selected.parentProductId, '');
+});
+
+test('full catalog excludes inactive entries and heads, retries after API failure and never swallows access denial', async () => {
+  const routes = variationRoutes();
+  routes['catalog.product.offer.list'] = {error: 'ACCESS_DENIED'};
+  const {api} = await adapter(routes);
+  await assert.rejects(api.listCatalogEntries(), /ACCESS_DENIED/);
+  routes['catalog.product.offer.list'] = variationRoutes()['catalog.product.offer.list'];
+  const entries = await api.listCatalogEntries();
+  assert.deepEqual(entries.map(entry => entry.id), ['411', '412']);
+});
+
 test('substring mode finds Cyrillic and numeric fragments in parent and variation names', async () => {
   const routes = variationRoutes();
   routes['catalog.product.sku.list'] = params => {
@@ -374,7 +419,7 @@ test('parent name and ID expand to active variations with their own IDs, names a
   }
   const priceIds = sdk.calls.filter(call => call.method === 'catalog.price.list').flatMap(call => call.params.filter['@productId']);
   assert.ok(priceIds.every(productId => [411,412].includes(productId)));
-  assert.equal(sdk.calls.find(call => call.method === 'catalog.product.offer.list' && call.params.filter.parentId).params.filter.iblockId, 8);
+  assert.equal(sdk.calls.some(call => call.params.filter?.parentId || call.params.filter?.['@parentId']), false);
   await assert.rejects(api.getProduct(401), /торговое предложение/);
   assert.deepEqual(await api.searchProducts('402'), []);
 });
@@ -401,13 +446,13 @@ test('parent and offer pages are complete and duplicate variation matches appear
   const {api,sdk} = await adapter(routes);
   const found = await api.searchProducts('Семейство');
   assert.deepEqual(found.map(row => row.id), ['411','412']);
-  assert.deepEqual(sdk.calls.find(call => call.method === 'catalog.product.offer.list' && call.params.filter['@parentId']).params.filter['@parentId'], [401,404]);
+  assert.equal(sdk.calls.some(call => call.params.filter?.parentId || call.params.filter?.['@parentId']), false);
 });
 
-test('variation search rejects incorrect parent bindings and never substitutes a parent price', async () => {
+test('unrelated variations do not abort a parent search and a missing own price is never replaced', async () => {
   const wrong = variationRoutes();
   wrong['catalog.product.offer.list'] = {data:{offers:[{id:411,iblockId:8,name:'Чужая вариация',type:4,parentId:{value:'999'}}]}};
-  await assert.rejects((await adapter(wrong)).api.searchProducts('401'), /другого основного товара/);
+  assert.deepEqual(await (await adapter(wrong)).api.searchProducts('401'), []);
   const missing = variationRoutes();
   missing['catalog.price.list'] = {data:{prices:[]}};
   await assert.rejects((await adapter(missing)).api.searchProducts('401'), /базовая цена отсутствует/);

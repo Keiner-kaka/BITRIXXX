@@ -210,7 +210,9 @@ with sync_playwright() as p:
 
     page.locator('#addItemBtn').click()
     expect(page.locator('#productResults .catalog-result')).to_have_count(4)
-    page.locator('#productResults .catalog-result').nth(2).click()
+    selected = page.locator('#productResults .catalog-result').nth(2).get_attribute('value')
+    page.locator('#productResultsSelect').select_option(selected)
+    page.locator('[data-choose-catalog=productResults]').click()
     expect(page.locator('.item-row')).to_have_count(3)
     expect(page.locator('[data-field=drawingId]')).to_have_count(0)
     page.locator('.item-row').last.locator('[data-action=remove]').click()

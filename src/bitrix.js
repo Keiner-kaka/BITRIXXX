@@ -137,7 +137,10 @@ function broadSearchError() {
 function variationParent(raw) {
   const value = raw.parentId && typeof raw.parentId === 'object' ? raw.parentId.value : raw.parentId;
   if (value === undefined || value === null || value === '' || String(value) === '0') return '';
-  return id(value, 'ID основного товара вариации');
+  // This relationship is optional metadata. Never invent a parent from an
+  // unfamiliar property shape; the offer's own ID/name/price remain authoritative.
+  try { return id(value, 'ID основного товара вариации'); }
+  catch { return ''; }
 }
 
 function stable(value) {
@@ -212,6 +215,9 @@ export class BitrixAdapter {
     this._catalogs = null;
     this._basePriceType = null;
     this._requests = [];
+    this._catalogEntries = null;
+    this._catalogEntryLoad = null;
+    this._catalogOffers = new Map();
   }
 
   /** Only method names, counters, timing and safe codes; never request/response bodies. */
@@ -334,7 +340,7 @@ export class BitrixAdapter {
   }
 
   /** SDK Result.more()/next() preserve next offsets for every supported list method. */
-  async _list(method, params = {}, key = null, {maxItems = Infinity} = {}) {
+  async _list(method, params = {}, key = null, {maxItems = Infinity, onPage} = {}) {
     this._guard(method);
     const trace = this._trace(method);
     return new Promise((resolve, reject) => {
@@ -375,6 +381,7 @@ export class BitrixAdapter {
           pages += 1;
           trace.pages = pages;
           trace.items = items.length;
+          onPage?.(page.length);
           const total = typeof result.total === 'function' ? result.total() : undefined;
           if (Number.isSafeInteger(total) && total >= 0) trace.total_items = total;
           if (items.length > maxItems) {
@@ -520,21 +527,96 @@ export class BitrixAdapter {
     return this._product(raw, prices.get(productId), source);
   }
 
+  async _allOffers(catalog, onPage) {
+    const iblockId = id(catalog.iblockId ?? catalog.id, 'ID инфоблока вариаций');
+    if (!this._catalogOffers.has(iblockId)) {
+      const pending = this._list('catalog.product.offer.list', {
+        select: ['id', 'iblockId', 'name', 'type', 'active', 'parentId'],
+        filter: {iblockId: Number(iblockId), active: 'Y'},
+        order: {name: 'ASC', id: 'ASC'},
+      }, 'offers', {onPage});
+      this._catalogOffers.set(iblockId, pending);
+      pending.catch(() => { if (this._catalogOffers.get(iblockId) === pending) this._catalogOffers.delete(iblockId); });
+    }
+    return this._catalogOffers.get(iblockId);
+  }
+
   async _offersForParents(catalog, parents) {
-    const parentIds = parents.map(parent => id(parent.id, 'ID основного товара'));
-    const expected = new Set(parentIds);
-    const offers = await this._list('catalog.product.offer.list', {
-      select: ['id', 'iblockId', 'name', 'type', 'active', 'parentId'],
-      filter: {iblockId: Number(id(catalog.iblockId ?? catalog.id, 'ID инфоблока вариаций')), active: 'Y',
-        ...(parentIds.length === 1 ? {parentId: Number(parentIds[0])} : {'@parentId': parentIds.map(Number)})},
-      order: {name: 'ASC', id: 'ASC'},
-    }, 'offers', {maxItems: MAX_SEARCH_ITEMS});
-    for (const offer of offers) {
-      if (!expected.has(variationParent(offer)) || [3, 6].includes(Number(offer.type))) {
-        throw new Error('Битрикс24 вернул вариацию другого основного товара. Уточните поиск.');
+    const expected = new Set(parents.map(parent => id(parent.id, 'ID основного товара')));
+    // Read the offer block once and group by its actual relationship data
+    // rather than relying on server-side parent filters.
+    return (await this._allOffers(catalog)).filter(offer => offer.active !== 'N'
+      && ![3, 6].includes(Number(offer.type)) && expected.has(variationParent(offer)));
+  }
+
+  /** Full metadata index; prices are verified separately for the selected ID. */
+  async listCatalogEntries({refresh = false, onProgress} = {}) {
+    if (refresh && !this._catalogEntryLoad) {
+      this._catalogEntries = null; this._catalogs = null; this._basePriceType = null; this._catalogOffers.clear();
+    }
+    if (this._catalogEntries) return this._catalogEntries.map(entry => ({...entry}));
+    if (!this._catalogEntryLoad) {
+      this._catalogEntryLoad = this._readCatalogEntries(onProgress);
+    }
+    const pending = this._catalogEntryLoad;
+    try {
+      this._catalogEntries = await pending;
+      return this._catalogEntries.map(entry => ({...entry}));
+    } finally {
+      if (this._catalogEntryLoad === pending) this._catalogEntryLoad = null;
+    }
+  }
+
+  async _readCatalogEntries(onProgress) {
+    const products = new Map(), parents = new Map();
+    let count = 0;
+    const onPage = size => { count += size; onProgress?.(count); };
+    const collect = (rows, source) => {
+      for (const raw of rows) {
+        if ((raw.active ?? raw.ACTIVE) === 'N') continue;
+        const productId = id(raw.id ?? raw.ID, 'ID товара');
+        if ([3, 6].includes(Number(raw.type ?? raw.TYPE))) { parents.set(productId, raw); continue; }
+        products.set(productId, {...this._product(raw, {}, source), verified: false});
+      }
+    };
+    let catalogs;
+    try { catalogs = await this._getCatalogs(); }
+    catch (error) {
+      if (!unavailable(error)) throw error;
+      for (const catalog of await this._list('crm.catalog.list')) {
+        collect(await this._list('crm.product.list', {
+          select: ['ID', 'NAME', 'CATALOG_ID', 'ACTIVE'],
+          filter: {CATALOG_ID: Number(id(catalog.ID, 'ID каталога')), ACTIVE: 'Y'},
+          order: {NAME: 'ASC', ID: 'ASC'},
+        }, null, {onPage}), 'crm.product.list');
+      }
+      return [...products.values()].sort((a, b) => a.name.localeCompare(b.name, 'ru') || Number(a.id) - Number(b.id));
+    }
+    for (const catalog of catalogs) {
+      if (Number(catalog.productIblockId) > 0) {
+        collect(await this._allOffers(catalog, onPage), 'catalog.product.offer.list');
+        continue;
+      }
+      const iblockId = Number(id(catalog.iblockId ?? catalog.id, 'ID инфоблока'));
+      collect(await this._list('catalog.product.list', {
+        select: ['id', 'iblockId', 'name', 'type', 'active'],
+        filter: {iblockId, active: 'Y'}, order: {name: 'ASC', id: 'ASC'},
+      }, 'products', {onPage}), 'catalog.product.list');
+      if (catalogs.some(other => String(other.productIblockId) === String(iblockId))) {
+        try {
+          const heads = await this._list('catalog.product.sku.list', {
+            select: ['id', 'iblockId', 'name', 'type', 'active'],
+            filter: {iblockId, active: 'Y'}, order: {name: 'ASC', id: 'ASC'},
+          }, 'units', {onPage});
+          for (const head of heads) if (head.active !== 'N') parents.set(id(head.id, 'ID основного товара'), head);
+        } catch (error) { if (!unavailable(error)) throw error; }
       }
     }
-    return offers.filter(offer => offer.active !== 'N');
+    for (const entry of products.values()) {
+      const parent = parents.get(entry.parentProductId);
+      if (parent) entry.parentProductName = String(parent.name ?? parent.NAME ?? '');
+    }
+    return [...products.values()].sort((a, b) => a.name.localeCompare(b.name, 'ru') || Number(a.id) - Number(b.id));
   }
 
   async _pricedProducts(products, parents = new Map()) {
