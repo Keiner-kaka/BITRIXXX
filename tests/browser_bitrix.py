@@ -111,10 +111,27 @@ MOCK = r"""
           document.pdfUrl='https://pilot.bitrix.example/documents/'+document.id+'.pdf';
           data={document:structuredClone(document)}; break;
         }
-        case 'catalog.catalog.list': data={catalogs:[{id:7,iblockId:7,name:'Каталог пилота',productIblockId:0}]}; break;
+        case 'catalog.catalog.list': data={catalogs:[{id:7,iblockId:7,name:'Каталог пилота',productIblockId:0}, ...(m.offers ? [{id:8,iblockId:8,name:'Вариации пилота',productIblockId:7,skuPropertyId:21}] : [])]}; break;
         case 'catalog.product.list':
           if (params.filter.iblockId !== 7) {error='WRONG_CATALOG'; break;}
           data={products:m.products.filter(product=>!params.filter['%name'] || product.name.toLowerCase().includes(params.filter['%name'].toLowerCase()))}; break;
+        case 'catalog.product.sku.list':
+          data={units:(m.parents || []).filter(parent=>parent.active !== 'N' && (!params.filter['%name'] || parent.name.toLowerCase().includes(params.filter['%name'].toLowerCase())))}; break;
+        case 'catalog.product.sku.get': {
+          const sku=(m.parents || []).find(parent=>parent.id===Number(params.id));
+          if (sku) data={sku}; else error='NOT_FOUND'; break;
+        }
+        case 'catalog.product.offer.list': {
+          if (params.filter.iblockId !== 8) {error='WRONG_VARIATION_CATALOG'; break;}
+          const ids=params.filter['@parentId'] || (params.filter.parentId ? [params.filter.parentId] : null);
+          data={offers:(m.offers || []).filter(offer=>offer.active !== 'N'
+            && (!params.filter['%name'] || offer.name.toLowerCase().includes(params.filter['%name'].toLowerCase()))
+            && (!ids || ids.includes(Number(offer.parentId?.value ?? offer.parentId))))}; break;
+        }
+        case 'catalog.product.offer.get': {
+          const offer=(m.offers || []).find(offer=>offer.id===Number(params.id));
+          if (offer) data={offer}; else error='NOT_FOUND'; break;
+        }
         case 'catalog.product.get': {
           if (m.conflictOnNextProductCheck) {m.dealRows[0].QUANTITY=m.dealRows[0].QUANTITY===999 ? 1000 : 999; m.conflictOnNextProductCheck=false;}
           const product=m.products.find(product=>product.id===Number(params.id));
@@ -123,7 +140,7 @@ MOCK = r"""
         case 'catalog.priceType.list': data={priceTypes:[{id:1,name:'BASE',base:'Y'}]}; break;
         case 'catalog.price.list':
           if (params.filter.catalogGroupId !== 1) {error='WRONG_PRICE_TYPE'; break;}
-          data={prices:m.products.filter(product=>params.filter['@productId'].includes(product.id)).map(product=>({id:product.id,productId:product.id,catalogGroupId:1,price:product.price,currency:'RUB'}))}; break;
+          data={prices:[...m.products,...(m.offers || [])].filter(product=>params.filter['@productId'].includes(product.id)).map(product=>({id:product.id,productId:product.id,catalogGroupId:1,price:product.price,currency:'RUB'}))}; break;
         case 'disk.folder.getChildren':
           data=Object.entries(m.files).filter(([,file])=>file.folderId===Number(params.id)).map(([fileId,file])=>({ID:fileId,NAME:file.name,TYPE:'file',DELETED_TYPE:0})); break;
         case 'disk.file.get': {
@@ -157,7 +174,8 @@ MOCK = r"""
         error:()=>error ? {status:400,ex:{error,error_description:'Mock API error'}} : undefined,
         data:()=>structuredClone(data), more:()=>false
       });
-      if (method==='user.get' && m.profileDelay && Number(params.FILTER.ID)===27) setTimeout(deliver,m.profileDelay);
+      if (method==='catalog.product.sku.list' && m.catalogDelay) setTimeout(deliver,m.catalogDelay);
+      else if (method==='user.get' && m.profileDelay && Number(params.FILTER.ID)===27) setTimeout(deliver,m.profileDelay);
       else queueMicrotask(deliver);
     }
   };
@@ -566,6 +584,112 @@ with sync_playwright() as p:
     assert not errors, errors
     assert not live_requests, live_requests
     passed('all mocked integration flows finish without uncaught browser errors or live portal calls')
+    variation_ctx = browser.new_context(viewport={'width':1440,'height':1100}, locale='ru-RU')
+    variation_ctx.add_init_script(MOCK + r"""
+      window.__pilotMock.parents=[{id:301,iblockId:7,name:'Опора серии VAR',type:3,active:'Y'}];
+      window.__pilotMock.offers=[
+        {id:311,iblockId:8,name:'Модель 100',type:4,active:'Y',parentId:{value:'301',valueId:'123'},price:500},
+        {id:312,iblockId:8,name:'Модель 200',type:4,active:'Y',parentId:301,price:900},
+        {id:313,iblockId:8,name:'Архивная модель',type:4,active:'N',parentId:301,price:999}
+      ];
+      Object.assign(window.__pilotMock.files['12'].data.prices_per_kg,{'301':999,'311':150,'312':200});
+    """)
+    variation_ctx.route('https://api.bitrix24.tech/**', lambda route: route.fulfill(status=200,content_type='application/javascript',body='/* SDK mock */'))
+    vp = variation_ctx.new_page()
+    vp.on('pageerror',lambda error: errors.append(str(error)))
+    vp.goto(BASE,wait_until='networkidle')
+    expect(vp.locator('#dealBadge')).to_contain_text('1048')
+    vp.locator('#addItemBtn').click()
+    expect(vp.locator('#productResults .catalog-result')).to_have_count(4)
+    vp.locator('#productQuery').fill('Опора серии VAR')
+    vp.locator('#productSearchBtn').click()
+    expect(vp.locator('#productResults .catalog-result')).to_have_count(2)
+    expect(vp.locator('#productResults')).to_contain_text('Модель 100 · вариация #311')
+    expect(vp.locator('#productResults')).not_to_contain_text('Архивная модель')
+    assert vp.locator('#productResults .catalog-result').evaluate_all("nodes=>nodes.map(node=>JSON.parse(node.dataset.product).id)") == ['311','312']
+    passed('parent-name search finds active variations whose own names differ and labels them separately')
+    vp.locator('#productQuery').fill('301')
+    vp.locator('#productSearchBtn').click()
+    expect(vp.locator('#productResults .catalog-result')).to_have_count(2)
+    vp.evaluate('window.__pilotMock.catalogDelay=800')
+    vp.locator('#productQuery').fill('Опора серии VAR')
+    vp.locator('#productSearchBtn').click()
+    vp.wait_for_function("window.__pilotMock.calls.at(-1).method==='catalog.product.sku.list'")
+    vp.locator('#productQuery').fill('311')
+    vp.locator('#productSearchBtn').click()
+    expect(vp.locator('#productResults .catalog-result')).to_have_count(1)
+    expect(vp.locator('#productResults')).to_contain_text('Модель 100')
+    vp.wait_for_timeout(1000)
+    expect(vp.locator('#productResults .catalog-result')).to_have_count(1)
+    vp.evaluate('window.__pilotMock.catalogDelay=0')
+    passed('parent ID expands to variations, exact variation ID stays exact and late searches cannot overwrite it')
+    vp.locator('#productResults .catalog-result').click()
+    expect(vp.locator('.item-row')).to_have_count(2)
+    vp.locator('.item-row').first.locator('[data-action=remove]').click()
+    vr = vp.locator('.item-row').first
+    expect(vr.locator('[data-field=productId]')).to_have_value('311')
+    expect(vr.locator('.base-price')).to_have_text(re.compile('500'))
+    vr.locator('[data-field=quantity]').fill('2')
+    vr.locator('[data-field=k1]').fill('1,2')
+    vr.locator('[data-field=k2]').fill('1,1')
+    vr.locator('[data-field=k3]').fill('1,05')
+    vr.locator('[data-field=executionTerm]').fill('15 рабочих дней')
+    assert money(vp.locator('#grandTotal').inner_text()) == '1386,00'
+    vp.locator('#createQuoteBtn').click()
+    expect(vp.locator('#quotePreview tbody tr')).to_have_count(1)
+    expect(vp.locator('#quotePreview tbody tr')).to_contain_text('Модель 100')
+    expect(vp.locator('#quotePreview')).not_to_contain_text('вариация #311')
+    vp.locator('#generateDocumentBtn').click()
+    expect(vp.locator('#documentResult')).to_contain_text('Документ #500 создан')
+    assert vp.evaluate('window.__pilotMock.dealRows.map(row=>[row.PRODUCT_ID,row.PRICE,row.QUANTITY])') == [[311,693,2]]
+    req = vp.evaluate("window.__pilotMock.calls.find(call=>call.method==='crm.documentgenerator.document.add').params")
+    assert req['values']['KpItems'][0]['Name'] == 'Модель 100'
+    assert money(req['values']['KpItems'][0]['Total']) == '1386,00'
+    saved_variation = vp.evaluate("JSON.parse(localStorage.getItem('yuzm-kp-prototype-v1-bitrix-pilot.bitrix.example-deal-1048')).state.variants[0].versions[0]")
+    assert saved_variation['rows'][0]['productId'] == '311'
+    assert saved_variation['rows'][0]['parentProductId'] == '301'
+    assert saved_variation['rows'][0]['isVariation'] and saved_variation['rows'][0]['basePrice'] == 500
+    passed('selected variation uses its own base price and ID in calculation, mandatory CRM transfer and document rows')
+    vp.locator('#closeQuoteBtn').click()
+    vp.reload(wait_until='networkidle')
+    vr = vp.locator('.item-row').first
+    expect(vr.locator('[data-field=productId]')).to_have_value('311')
+    expect(vr.locator('[data-field=productId] option:checked')).to_contain_text('вариация #311')
+    assert money(vp.locator('#grandTotal').inner_text()) == '1386,00'
+    passed('variation identity, name and price survive reload without replacing saved quote data')
+    vp.locator('#settingsBtn').click()
+    vp.locator('#formulaMode').select_option('excel')
+    vp.locator('#metalPricesFileId').fill('12')
+    vp.locator('#loadMetalPricesBtn').click()
+    expect(vp.locator('#settingsError')).to_contain_text('Цены металла загружены с Диска')
+    vp.locator('#closeSettingsBtn').click()
+    vr = vp.locator('.item-row').first
+    expect(vr.locator('[data-field=pricePerKg]')).to_have_value('150')
+    vr.locator('[data-field=weight]').fill('2')
+    vr.locator('[data-field=fasteners]').fill('10')
+    assert money(vp.locator('#grandTotal').inner_text()) == '851,60'
+    vp.locator('#addItemBtn').click()
+    vp.locator('#productQuery').fill('312')
+    vp.locator('#productSearchBtn').click()
+    expect(vp.locator('#productResults .catalog-result')).to_have_count(1)
+    vp.locator('#productResults .catalog-result').click()
+    expect(vp.locator('.item-row').last.locator('[data-field=pricePerKg]')).to_have_value('200')
+    vp.locator('.item-row').last.locator('[data-field=weight]').fill('3')
+    vp.locator('.item-row').last.locator('[data-field=fasteners]').fill('20')
+    assert money(vp.locator('#grandTotal').inner_text()) == '1471,60'
+    passed('Excel loads metal prices by variation ID and applies all three coefficients without using the parent metal price')
+    # A parent metal price cannot cover a missing rate for a concrete variation.
+    vp.evaluate("delete window.__pilotMock.files['12'].data.prices_per_kg['312']")
+    vp.locator('#settingsBtn').click()
+    vp.locator('#loadMetalPricesBtn').click()
+    expect(vp.locator('#settingsError')).to_contain_text('Цены металла загружены с Диска')
+    vp.locator('#closeSettingsBtn').click()
+    expect(vp.locator('.item-row').last.locator('[data-field=pricePerKg]')).to_have_value('')
+    expect(vp.locator('#saveBtn')).to_be_disabled()
+    assert vp.evaluate("JSON.parse(localStorage.getItem('yuzm-kp-prototype-v1-bitrix-pilot.bitrix.example-deal-1048')).state.variants[0].versions[0]") == saved_variation
+    passed('missing variation metal price blocks Excel even when the parent rate exists and keeps the saved catalog version exact')
+    variation_ctx.close()
+
     # Isolated signature scenarios keep the main integration history unchanged.
     manager_context = browser.new_context(viewport={'width':1440,'height':1100}, locale='ru-RU')
     manager_context.add_init_script(MOCK)

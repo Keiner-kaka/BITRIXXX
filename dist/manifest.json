@@ -1,10 +1,10 @@
 {
   "name": "ЮЗМ — конструктор КП для Bitrix24",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "validation": {
     "node_test_files_passed": 3,
     "browser_ui_checks_passed": 23,
-    "browser_mock_bitrix_checks_passed": 32,
+    "browser_mock_bitrix_checks_passed": 38,
     "browser_connection_checks_passed": 7,
     "live_bitrix_tested": false,
     "uploaded_template_preserved": true
@@ -29,11 +29,11 @@
     ]
   },
   "files": {
-    "index.html": "992bc68666acda218d0f1f22dfb6ed9bfc584deadb2e3e10145fa05d887921d2",
+    "index.html": "6637c43f1e0c9687ebbe42469122edc1852808c6056b0bf4aecf0f91a3430968",
     "styles.css": "0ce09a19ebac16a8cb4e92119f1b129effada3fc0e459573433ec6cf50302e8e",
-    "src/app.js": "31a381445e5a05a70d8009310ebde161e72f61d7dd051acb0fa0639eae26ed07",
+    "src/app.js": "d2bcf87d4000551509ba3e8358e1974bf1f52d88085340fe58a483cb83b45d4b",
     "src/calculator.js": "796664b3a01f250b937691746981d1c170fc86158a4f5ccf7f04e610f170ff13",
-    "src/bitrix.js": "a701312dd38e33c5aaa37721f03197179775ee1fb945dddd2a4b83065b14880f",
+    "src/bitrix.js": "e2fe81aa225f5efef114aaa5a34e75bee8106f33a1e5c9cc1b4f80cbb4eb7754",
     "src/demo.js": "8063fa1daad50af348f49622d35d342b0634be260462a183cf10d5c660e3b97b",
     "src/sdk-loader.js": "f820e46d0471efe3d06f5e080018cc96a379c78d3cb8ff80c5a72a7a8687bd93",
     "data/coatings.example.json": "0886ea04df7d58fc26ef5a52262daf0e7e8a5c588728664c86ea8d3d9d50629b",
@@ -41,24 +41,24 @@
     "index.php": "41c031910e37d6e0e2903fbc2624d0916a41d031aea7c74d95e2cb4945e9dd94",
     "install.html": "12eb675c13283a07bef79123307ff12f460f01172d9e4a852eaa136f8f0c1cf4",
     "install.php": "65d4e9de9233ed148cfd95b94a817c59bc4b44b4fe785d949cb04f6ef3c3d532",
-    "package.json": "c6625b2ba6e05cdb1580f90b1707fbfdc58c7f9d86dd6aa75e6d66fce10a2be1",
-    "README.md": "fe3fba1d3b205320b9551e87dd91ee5f2f435c31f69b997e7bdca747b49ae05d",
+    "package.json": "b7c18b90e257e828824c2f057009b2b2fec7fe0e89b777c971ad4dba5e710cbf",
+    "README.md": "73164be0e38dc7119411849f20cb3dc1b9c777a4044c5fcb07f71235dfc74bb0",
     "data/prices.original.example.json": "4862dc2ba836a6d23227c17a4a18d977c7624dffdccbb04f401bd579ae83f5b1",
     "data/templates/kp-yuzm-bitrix24.docx": "3377040b4cac13004b2587c92d144388df0871aa3e641d1fd236ffb6d534c57c",
-    "docs/contracts.md": "8b03e5c71009eac1f79026a0b500ac0c9228980916594406ef3525079f86e7f1",
-    "docs/data-format.md": "a1c3a2f042545f4dd9897d94f5f2c8305272d4040c778dc5cf05abedc7c9d8c3",
-    "docs/integration.md": "3346a85bc9e66abaef873e53e0eb678d55479a465f92a76d47711061f5bca1f0",
-    "docs/validation.md": "63da4912081167f25fde5ed8683c78581e2197bcd12a03e727454ab059d54202",
-    "tests/bitrix.test.js": "cf4337ca7193531e13419f0ce582526733c67f860126855f7a4f36994b3ae71e",
-    "tests/browser_bitrix.py": "c1b512636fd5b44255b1019af616c892af6b4814fb6073907020d1d4559d80ab",
+    "docs/contracts.md": "99c08278917d155ec90caccd983eeb642489ddf576a2abb5df695aee27737b28",
+    "docs/data-format.md": "af3a832c0fc2af37e9c69247d47235fd0eb1d199874bff7b35a7c11120933a2b",
+    "docs/integration.md": "72fe7d3cd1477871c24eb6809a960df9fb135db6a0003120623bbee5557e2fab",
+    "docs/validation.md": "3514e51e676547d06c5d97d7871204fe7dcae959298b475b893db42035de2c9a",
+    "tests/bitrix.test.js": "4114d9b7423d765622b205bc711590cf5ad782b007c66a33ca4c4fae6b54fa55",
+    "tests/browser_bitrix.py": "5b2052cf4bc3905fc384000151dcc99f12f972d41e4b8e1b35662c5f0799d921",
     "tests/browser_connection.py": "2282e47aea31637fe11b6749d6a69d495acfeb88e65bac92f20b2afedf0bde67",
     "tests/browser_smoke.py": "542923a9883b166d8b81a76f466058c30df2f11ce9fb7338b29f8c0d849fc02d",
     "tests/calculator.test.js": "c61a051856c79433c877e3ef81922b8fa69b5869f110dab657a82b07524f8312",
     "tests/excel-file.test.js": "feded2b46a8cbb61462e2cf0196ad46d58e174883a5366e3fce2b7f18b5fb42f",
     "tests/fixtures/excel-calculation.json": "f82cf8ad0103f8e8585dfa53035248968dd23c0a51f3a648af3777e7900a3fa1",
-    "scripts/package.py": "91e6d60734d32ec22dac97abf7575c696f8eb29388bac811731524fc756e7b53",
+    "scripts/package.py": "c701f68ab92425d10598f7972d99b35090e909079952036d8f3047504ebc0c3c",
     "dist/prototype.png": "2982e26aee84cfbb312068219825e4cc51c1d18d28c647ca0de14ae3a88eb71d",
     "dist/demo-kp.pdf": "2ac89df217671e37a5775d2e44cbb25adedd67395fdf4b3b63fd8c82c3864fad",
-    "dist/yuzm-kp-bitrix.zip": "4adc13c5805cae8eaaa9f48c6805a94a4e86b92b8c2da91ddad49a6950c3c4ee"
+    "dist/yuzm-kp-bitrix.zip": "24961d4d7995049af581b826b35f1da1ccb7e501e41bf925cad848831565b1dd"
   }
 }

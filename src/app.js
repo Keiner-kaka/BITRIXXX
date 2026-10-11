@@ -15,6 +15,7 @@ let templates = [], templatesLoaded = false;
 let sharedTemplate = {id: '', loaded: false, loading: false, error: ''};
 let managerProfile = null, managerLoading = false, managerRequest = 0, managerMessage = '';
 let previewFingerprint = null;
+const productSearchRequests = new Map();
 const documentFieldNames = ['YuzmPaymentTerms', 'YuzmFastenerTerms', 'YuzmDocumentsTerms', 'YuzmDeliveryTerms', 'YuzmValidityTerms', 'YuzmManagerPosition', 'YuzmManagerName', 'YuzmManagerPhone'];
 const managerFields = ['YuzmManagerPosition', 'YuzmManagerName', 'YuzmManagerPhone'];
 const paymentPresets = {
@@ -237,9 +238,19 @@ function metalPriceFor(productId) {
   return metalPrices?.currency === config.currency && metalPrices.prices_per_kg[productId] !== undefined
     ? String(metalPrices.prices_per_kg[productId]) : '';
 }
+function productLabel(product) {
+  return product.name + (product.isVariation ? ' · вариация #' + product.id : '');
+}
+function assignProduct(row, product) {
+  Object.assign(row, {productId: String(product.id), productName: product.name, basePrice: product.basePrice,
+    currency: product.currency, source: product.source || 'catalog', priceSource: product.source === 'deal' ? 'deal' : 'catalog',
+    pricePerKg: metalPriceFor(product.id), weight: ''});
+  delete row.isVariation; delete row.parentProductId; delete row.parentProductName;
+  if (product.isVariation) Object.assign(row, {isVariation: true, parentProductId: product.parentProductId || '', parentProductName: product.parentProductName || ''});
+}
 function renderRows() {
   const nodes = draft().rows.map(row => {
-    const nameOptions = catalogProducts.map(p => ({value: String(p.id), text: p.name}));
+    const nameOptions = catalogProducts.map(p => ({value: String(p.id), text: productLabel(p)}));
     if (!nameOptions.some(p => p.value === String(row.productId))) nameOptions.unshift({value: String(row.productId), text: row.productName || 'Товар не выбран'});
     const productSelect = select(nameOptions, String(row.productId), {'data-field': 'productId', 'aria-label': 'Товар позиции'});
     const baseText = element('span', {class: 'base-price', text: formatMoney(row.basePrice, row.currency || config.currency)});
@@ -639,28 +650,34 @@ async function importFile(event) {
   finally { event.target.value = ''; }
 }
 async function searchProducts(query, target) {
+  const request = (productSearchRequests.get(target) || 0) + 1;
+  productSearchRequests.set(target, request);
   $(target).textContent = 'Поиск…';
   try {
     const matches = connected
-      ? (/^[1-9]\d*$/.test(query) ? [await adapter.getProduct(query)] : await adapter.searchProducts(query))
+      ? await adapter.searchProducts(query)
       : demoProducts.filter(p => p.id === query || p.name.toLocaleLowerCase('ru').includes(query.toLocaleLowerCase('ru')));
+    if (productSearchRequests.get(target) !== request) return;
     $(target).replaceChildren(...matches.map(product => element('button', {
       type: 'button', class: 'catalog-result', 'data-product': JSON.stringify(product),
-      text: product.name + ' · ' + formatMoney(product.basePrice, product.currency) + ' · #' + product.id
+      text: productLabel(product) + (product.parentProductName ? ' · основной товар: ' + product.parentProductName : '')
+        + ' · ' + formatMoney(product.basePrice, product.currency) + ' · #' + product.id
     })));
-    if (!matches.length) $(target).append(element('p', {class: 'empty-state', text: 'Товары не найдены. Можно искать по точному ID.'}));
-  } catch (error) { $(target).textContent = safeError(error); }
+    if (!matches.length) $(target).append(element('p', {class: 'empty-state', text: 'Товары и активные вариации не найдены. Можно искать по названию или ID основного товара и вариации.'}));
+  } catch (error) { if (productSearchRequests.get(target) === request) $(target).textContent = safeError(error); }
 }
 function chooseProduct(product) {
   if (product.currency !== config.currency) throw new Error('Валюта товара не совпадает с валютой КП. Автоматическая конвертация не выполняется.');
   product.source = connected ? 'catalog' : 'demo';
-  if (!catalogProducts.some(p => String(p.id) === String(product.id))) catalogProducts.push(product);
+  const cached = catalogProducts.findIndex(p => String(p.id) === String(product.id));
+  if (cached >= 0) catalogProducts[cached] = product;
+  else catalogProducts.push(product);
   if (chosenRow) {
     const row = draft().rows.find(r => r.id === chosenRow);
     if (!row) throw new Error('Позиция уже удалена.');
-    Object.assign(row, {productId: String(product.id), productName: product.name, basePrice: product.basePrice, currency: product.currency, source: product.source, priceSource: 'catalog', pricePerKg: metalPriceFor(product.id), weight: ''});
+    assignProduct(row, product);
   } else {
-    const row = newRow(product); row.pricePerKg = metalPriceFor(product.id); draft().rows.push(row);
+    const row = newRow(product); assignProduct(row, product); draft().rows.push(row);
   }
   renderRows(); renderDocuments();
   if ($('productDialog').open) closeDialog('productDialog');
@@ -687,7 +704,8 @@ async function connectDeal(id) {
   }
   state.activeDealId = String(id);
   state.settings = {...state.settings, ...savedSettings};
-  catalogProducts = state.variants.flatMap(v => v.draft.rows).map(r => ({id: r.productId, name: r.productName, basePrice: r.basePrice, currency: r.currency, source: r.source}));
+  catalogProducts = state.variants.flatMap(v => v.draft.rows).map(r => ({id: r.productId, name: r.productName, basePrice: r.basePrice, currency: r.currency, source: r.source,
+    ...(r.isVariation ? {isVariation: true, parentProductId: r.parentProductId || '', parentProductName: r.parentProductName || ''} : {})}));
   if (state.settings.historyFolderId) {
     try {
       const snapshots = await adapter.loadHistory(state.settings.historyFolderId, id);
@@ -786,7 +804,7 @@ function bindEvents() {
     const row = draft().rows.find(r => r.id === e.target.closest('[data-row-id]')?.dataset.rowId); if (!row) return;
     if (field === 'productId') {
       const product = catalogProducts.find(p => String(p.id) === e.target.value); if (!product) return;
-      Object.assign(row, {productId: String(product.id), productName: product.name, basePrice: product.basePrice, currency: product.currency, source: product.source || 'catalog', pricePerKg: metalPriceFor(product.id), weight: ''});
+      assignProduct(row, product);
       } else row[field] = e.target.value;
     renderRows(); renderDocuments();
   });

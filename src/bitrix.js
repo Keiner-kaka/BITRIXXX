@@ -101,6 +101,12 @@ function unavailable(error) {
   return ['ERROR_METHOD_NOT_FOUND', 'METHOD_NOT_FOUND', 'ERROR_UNKNOWN_METHOD'].includes(error?.code);
 }
 
+function variationParent(raw) {
+  const value = raw.parentId && typeof raw.parentId === 'object' ? raw.parentId.value : raw.parentId;
+  if (value === undefined || value === null || value === '' || String(value) === '0') return '';
+  return id(value, 'ID основного товара вариации');
+}
+
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
   if (value && typeof value === 'object') {
@@ -366,7 +372,9 @@ export class BitrixAdapter {
     if (!name) throw new Error(`Товар #${productId}: API не вернул торговое наименование.`);
     const type = Number(raw.type ?? raw.TYPE);
     if ([3, 6].includes(type)) throw new Error(`Товар #${productId} — головной товар SKU. Выберите конкретное торговое предложение.`);
-    return { id: productId, name, ...price, verified: true, source };
+    const variation = [4, 5].includes(type) || source.startsWith('catalog.product.offer.');
+    return { id: productId, name, ...price, verified: true, source,
+      ...(variation ? {isVariation: true, parentProductId: variationParent(raw)} : {}) };
   }
 
   async _legacyProduct(productId) {
@@ -383,9 +391,7 @@ export class BitrixAdapter {
     return this._product(raw, price, 'crm.product.get');
   }
 
-  async getProduct(value) {
-    const productId = id(value, 'ID товара');
-    let raw, source;
+  async _readProduct(productId) {
     for (const [method, key] of [
       ['catalog.product.get', 'product'],
       ['catalog.product.offer.get', 'offer'],
@@ -394,10 +400,17 @@ export class BitrixAdapter {
       try {
         const data = await this.call(method, { id: Number(productId) });
         if (String(data?.[key]?.id) !== productId) continue;
-        raw = data[key]; source = method; break;
+        return {raw: data[key], source: method};
       } catch { /* A different product kind may own this ID; validate each response. */ }
     }
-    if (!raw) return this._legacyProduct(productId);
+    return null;
+  }
+
+  async getProduct(value) {
+    const productId = id(value, 'ID товара');
+    const found = await this._readProduct(productId);
+    if (!found) return this._legacyProduct(productId);
+    const {raw, source} = found;
     if ([3, 6].includes(Number(raw.type))) {
       throw new Error(`Товар #${productId} — головной товар SKU. Выберите конкретное торговое предложение.`);
     }
@@ -405,8 +418,60 @@ export class BitrixAdapter {
     return this._product(raw, prices.get(productId), source);
   }
 
+  async _offersForParents(catalog, parents) {
+    const parentIds = parents.map(parent => id(parent.id, 'ID основного товара'));
+    const expected = new Set(parentIds);
+    const offers = await this._list('catalog.product.offer.list', {
+      select: ['id', 'iblockId', 'name', 'type', 'active', 'parentId'],
+      filter: {iblockId: Number(id(catalog.iblockId ?? catalog.id, 'ID инфоблока вариаций')), active: 'Y',
+        ...(parentIds.length === 1 ? {parentId: Number(parentIds[0])} : {'@parentId': parentIds.map(Number)})},
+      order: {name: 'ASC', id: 'ASC'},
+    }, 'offers');
+    for (const offer of offers) {
+      if (!expected.has(variationParent(offer)) || [3, 6].includes(Number(offer.type))) {
+        throw new Error('Битрикс24 вернул вариацию другого основного товара. Уточните поиск.');
+      }
+    }
+    return offers.filter(offer => offer.active !== 'N');
+  }
+
+  async _pricedProducts(products, parents = new Map()) {
+    const output = [], allIds = [...products.keys()];
+    for (let offset = 0; offset < allIds.length; offset += 50) {
+      const chunk = allIds.slice(offset, offset + 50);
+      const prices = await this._prices(chunk);
+      for (const productId of chunk) {
+        const found = products.get(productId);
+        const product = this._product(found.raw, prices.get(productId), found.source);
+        const parent = parents.get(product.parentProductId);
+        if (parent) product.parentProductName = String(parent.name);
+        output.push(product);
+      }
+    }
+    return output.sort((a, b) => a.name.localeCompare(b.name, 'ru') || Number(a.id) - Number(b.id));
+  }
+
   async searchProducts(query = '') {
     const text = String(query).trim();
+    // A parent ID expands into its offers; a concrete product ID stays exact.
+    if (/^[1-9]\d*$/.test(text)) {
+      const productId = id(text, 'ID товара');
+      const found = await this._readProduct(productId);
+      if (!found) return [await this._legacyProduct(productId)];
+      if (![3, 6].includes(Number(found.raw.type))) {
+        return this._pricedProducts(new Map([[productId, found]]));
+      }
+      const parent = found.raw;
+      const iblockId = id(parent.iblockId, 'ID инфоблока основного товара');
+      const catalogs = (await this._getCatalogs()).filter(catalog => String(catalog.productIblockId) === iblockId);
+      const products = new Map();
+      for (const catalog of catalogs) {
+        for (const raw of await this._offersForParents(catalog, [parent])) {
+          products.set(id(raw.id, 'ID вариации'), {raw, source: 'catalog.product.offer.list'});
+        }
+      }
+      return this._pricedProducts(products, new Map([[productId, parent]]));
+    }
     let catalogs;
     try { catalogs = await this._getCatalogs(); }
     catch (error) {
@@ -423,33 +488,42 @@ export class BitrixAdapter {
       }
       return [...new Map(products.map(product => [product.id, product])).values()];
     }
-    const products = new Map();
+    const products = new Map(), parents = new Map();
     for (const catalog of catalogs) {
       const offers = Number(catalog.productIblockId) > 0;
       const method = offers ? 'catalog.product.offer.list' : 'catalog.product.list';
       const key = offers ? 'offers' : 'products';
       const rows = await this._list(method, {
-        select: ['id', 'iblockId', 'name', 'type'],
+        select: ['id', 'iblockId', 'name', 'type', 'active', ...(offers ? ['parentId'] : [])],
         filter: { iblockId: Number(id(catalog.iblockId ?? catalog.id, 'ID инфоблока')), active: 'Y', ...(text ? { '%name': text } : {}) },
         order: { name: 'ASC', id: 'ASC' },
       }, key);
       for (const row of rows) {
-        if ([3, 6].includes(Number(row.type))) continue;
+        if (row.active === 'N') continue;
+        if ([3, 6].includes(Number(row.type))) { parents.set(id(row.id, 'ID основного товара'), row); continue; }
         products.set(id(row.id, 'ID товара'), { raw: row, source: method });
       }
-    }
-    if (!products.size) return [];
-    const output = [];
-    const allIds = [...products.keys()];
-    for (let offset = 0; offset < allIds.length; offset += 50) {
-      const chunk = allIds.slice(offset, offset + 50);
-      const prices = await this._prices(chunk);
-      for (const productId of chunk) {
-        const product = products.get(productId);
-        output.push(this._product(product.raw, prices.get(productId), product.source));
+      if (!offers && catalogs.some(other => String(other.productIblockId) === String(catalog.iblockId ?? catalog.id))) {
+        try {
+          const heads = await this._list('catalog.product.sku.list', {
+            select: ['id', 'iblockId', 'name', 'type', 'active'],
+            filter: {iblockId: Number(id(catalog.iblockId ?? catalog.id, 'ID инфоблока')), active: 'Y', ...(text ? {'%name': text} : {})},
+            order: {name: 'ASC', id: 'ASC'},
+          }, 'units');
+          for (const head of heads) if (head.active !== 'N') parents.set(id(head.id, 'ID основного товара'), head);
+        } catch (error) { if (!unavailable(error)) throw error; }
       }
     }
-    return output.sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    // Offer names can differ from the parent name. Include the matching parent's offers too.
+    if (text) for (const catalog of catalogs.filter(catalog => Number(catalog.productIblockId) > 0)) {
+      const heads = [...parents.values()].filter(parent => String(parent.iblockId) === String(catalog.productIblockId));
+      for (let offset = 0; offset < heads.length; offset += 50) {
+        for (const raw of await this._offersForParents(catalog, heads.slice(offset, offset + 50))) {
+          products.set(id(raw.id, 'ID вариации'), {raw, source: 'catalog.product.offer.list'});
+        }
+      }
+    }
+    return this._pricedProducts(products, parents);
   }
 
   async loadDeal(value) {
