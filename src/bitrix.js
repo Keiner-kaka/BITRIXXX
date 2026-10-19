@@ -15,6 +15,23 @@ const ALLOWED_METHODS = new Set([
   'disk.file.get', 'disk.folder.getChildren', 'disk.folder.uploadFile',
   'placement.bind', 'placement.get',
 ]);
+// An explicit allowlist prevents retries of writes, document creation or uploads.
+const READ_METHODS = new Set([
+  'app.info', 'app.option.get', 'user.get',
+  'crm.deal.get', 'crm.deal.productrows.get', 'crm.company.get', 'crm.contact.get',
+  'crm.catalog.list', 'crm.product.list', 'crm.product.get',
+  'catalog.catalog.list', 'catalog.product.list', 'catalog.product.get',
+  'catalog.product.offer.list', 'catalog.product.offer.get',
+  'catalog.product.sku.list', 'catalog.product.sku.get',
+  'catalog.priceType.list', 'catalog.price.list',
+  'crm.documentgenerator.template.list', 'crm.documentgenerator.template.get',
+  'crm.documentgenerator.document.get', 'disk.file.get', 'disk.folder.getChildren', 'placement.get',
+]);
+const RETRYABLE_READ_ERRORS = new Set([
+  'REQUEST_TIMEOUT', 'NETWORK_ERROR', 'INVALID_RESPONSE', 'QUERY_LIMIT_EXCEEDED',
+  'INTERNAL_SERVER_ERROR', 'ERROR_UNEXPECTED_ANSWER', 'HTTP_429',
+  'HTTP_500', 'HTTP_502', 'HTTP_503', 'HTTP_504',
+]);
 const MAX_JSON_BYTES = 5 * 1024 * 1024;
 const QUOTE_TEMPLATE_OPTION = 'yuzmQuoteTemplateId';
 const MAX_SEARCH_ITEMS = 500;
@@ -111,11 +128,13 @@ function apiError(method, result) {
     '200040300040': 'У сотрудника нет права на чтение этого товара или его инфоблока.',
     '200040300000': 'Инфоблок товара не найден на этом портале.',
     insufficient_scope: 'Проверьте разрешения установленного приложения; после изменения прав переустановите его.',
-    QUERY_LIMIT_EXCEEDED: 'Превышен лимит запросов Bitrix24. Подождите и повторите поиск.',
+    QUERY_LIMIT_EXCEEDED: 'Превышен лимит запросов Bitrix24. Подождите и повторите запрос.',
     OPERATION_TIME_LIMIT: 'Bitrix24 временно заблокировал метод из-за нагрузки. Повторите запрос позже.',
     OVERLOAD_LIMIT: 'REST API портала заблокирован из-за нагрузки. Обратитесь в поддержку Bitrix24.',
     INTERNAL_SERVER_ERROR: 'Внутренняя ошибка Bitrix24. Повторите запрос позже.',
     ERROR_UNEXPECTED_ANSWER: 'Bitrix24 вернул неожиданный ответ. Повторите запрос позже.',
+    expired_token: 'Сессия приложения истекла. Откройте приложение заново внутри Битрикс24.',
+    LICENSE_ERROR: 'Битрикс24 ограничил доступ к REST API по лицензии. Проверьте доступность REST на портале.',
     API_ERROR: 'Bitrix24 не вернул распознаваемый код ошибки. Проверьте запрос и доступ сотрудника к каталогу.',
   };
   const error = new Error(`Bitrix24: ${method} — ${code}. ${hints[code] ?? 'Проверьте права приложения и пользователя.'}`);
@@ -126,6 +145,40 @@ function apiError(method, result) {
 
 function unavailable(error) {
   return ['ERROR_METHOD_NOT_FOUND', 'METHOD_NOT_FOUND', 'ERROR_UNKNOWN_METHOD'].includes(error?.code);
+}
+
+function transportError(method, code, httpStatus) {
+  const hints = {
+    REQUEST_TIMEOUT: 'Портал не ответил за отведённое время. Повторите запрос; при повторном сбое скопируйте диагностику из настроек.',
+    NETWORK_ERROR: 'Браузер не получил ответ портала. Проверьте соединение и доступ к порталу, затем повторите запрос.',
+    INVALID_RESPONSE: 'Портал вернул некорректный ответ. Повторите запрос; при повторном сбое скопируйте диагностику из настроек.',
+    AUTH_REFRESH_TIMEOUT: 'Портал не подтвердил обновление сессии. Откройте приложение заново внутри Битрикс24.',
+    AUTH_UNAVAILABLE: 'Не удалось получить сессию приложения. Откройте приложение заново внутри Битрикс24.',
+    SDK_REQUEST_FAILED: 'Ошибка транспорта SDK. Скопируйте диагностику из настроек.',
+  };
+  const error = new Error(`Bitrix24: ${method} — ${code}. ${hints[code] ?? 'Портал вернул ошибку HTTP. Повторите запрос; при повторном сбое скопируйте диагностику из настроек.'}`);
+  error.code = code;
+  error.method = method;
+  if (httpStatus) error.httpStatus = httpStatus;
+  return error;
+}
+
+function restResult(answer) {
+  return {
+    answer,
+    error: () => Object.hasOwn(answer, 'error') ? {getError: () => answer} : false,
+    data: () => answer.result,
+    total: () => answer.total === undefined ? undefined : Number(answer.total),
+    more: () => answer.next !== undefined && answer.next !== null,
+  };
+}
+
+function appendParams(body, value, prefix) {
+  if (value && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) {
+      appendParams(body, item, prefix ? `${prefix}[${key}]` : key);
+    }
+  } else if (value !== undefined) body.append(prefix, value === null ? '' : String(value));
 }
 
 function broadSearchError() {
@@ -209,6 +262,11 @@ export class BitrixAdapter {
     this.placementContext = options.placementContext ?? globalThis.B24_PLACEMENT_CONTEXT;
     this.timeoutMs = options.timeoutMs ?? 20000;
     this.initTimeoutMs = options.initTimeoutMs ?? 15000;
+    this.readSpacingMs = options.readSpacingMs ?? 550;
+    this.readRetryDelayMs = options.readRetryDelayMs ?? 1000;
+    this._readPace = Promise.resolve();
+    this._nextReadAt = 0;
+    this._authRefresh = null;
     this.connected = false;
     this.connectionError = null;
     this.dealId = null;
@@ -237,6 +295,7 @@ export class BitrixAdapter {
     entry.state = error ? 'error' : 'success';
     entry.elapsed_ms = Math.max(0, Date.now() - entry.startedAt);
     if (error) entry.code = error.code ?? 'CLIENT_ERROR';
+    delete entry.phase;
   }
 
   async init() {
@@ -292,28 +351,176 @@ export class BitrixAdapter {
   async call(method, params = {}) {
     this._guard(method);
     const trace = this._trace(method);
+    try {
+      const result = await this._requestResult(method, params, trace);
+      let data;
+      try {
+        if (result.error()) throw apiError(method, result);
+        data = result.data();
+      } catch (error) {
+        throw error?.method === method ? error : transportError(method, 'INVALID_RESPONSE');
+      }
+      this._finishTrace(trace);
+      return data;
+    } catch (error) {
+      this._finishTrace(trace, error);
+      throw error;
+    }
+  }
+
+  async _paceRead(trace, start) {
+    trace.phase = 'queued';
+    const pending = this._readPace.then(async () => {
+      const delay = this._nextReadAt - Date.now();
+      if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+      const result = start();
+      this._nextReadAt = Date.now() + this.readSpacingMs;
+      // Queue request starts, not their completion: a stalled read must not
+      // prevent another screen from reading an unrelated resource.
+      return {result};
+    });
+    this._readPace = pending.catch(() => {});
+    return (await pending).result;
+  }
+
+  async _refreshReadAuth(method) {
+    if (!this._authRefresh) {
+      const pending = new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (error, auth) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          error ? reject(error) : resolve(auth);
+        };
+        const timer = setTimeout(() => finish(transportError(method, 'AUTH_REFRESH_TIMEOUT')), this.initTimeoutMs);
+        try {
+          if (typeof this.sdk.refreshAuth !== 'function') return finish(transportError(method, 'AUTH_UNAVAILABLE'));
+          this.sdk.refreshAuth(auth => finish(auth?.access_token ? null : transportError(method, 'AUTH_UNAVAILABLE'), auth));
+        } catch { finish(transportError(method, 'AUTH_UNAVAILABLE')); }
+      });
+      this._authRefresh = pending;
+      pending.finally(() => { if (this._authRefresh === pending) this._authRefresh = null; }).catch(() => {});
+    }
+    try { return await this._authRefresh; }
+    catch (error) { throw transportError(method, error.code); }
+  }
+
+  async _fetchRead(method, params, trace) {
+    let retries = 0, refreshed = false;
+    for (;;) {
+      trace.transport = 'rest';
+      trace.phase = 'session';
+      let auth;
+      try { auth = this.sdk.getAuth(); } catch { throw transportError(method, 'AUTH_UNAVAILABLE'); }
+      if (!auth?.access_token) {
+        if (refreshed) throw transportError(method, 'AUTH_UNAVAILABLE');
+        auth = await this._refreshReadAuth(method);
+        refreshed = true;
+      }
+      // Tokens remain in the POST body, only in memory, and only go to the SDK's portal.
+      if (typeof auth.access_token !== 'string' || !/^[a-z\d.-]+(?::\d{1,5})?$/i.test(auth.domain ?? '')) {
+        throw transportError(method, 'AUTH_UNAVAILABLE');
+      }
+      const protocol = this.location?.protocol === 'http:' ? 'http:' : 'https:';
+      const url = `${protocol}//${auth.domain}/rest/${method}.json`;
+      const body = new URLSearchParams({auth: auth.access_token});
+      if (Object.hasOwn(params, 'auth')) throw transportError(method, 'AUTH_UNAVAILABLE');
+      appendParams(body, params, '');
+      const controller = new AbortController();
+      let timer;
+      let active = true;
+      try {
+        const result = await this._paceRead(trace, () => {
+          trace.attempts = (trace.attempts ?? 0) + 1;
+          delete trace.http_status;
+          trace.phase = 'response';
+          return Promise.race([
+            (async () => {
+              let response, text;
+              try {
+                response = await this.fetch(url, {method: 'POST', body,
+                  headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                  signal: controller.signal, credentials: 'omit', redirect: 'error',
+                  cache: 'no-store', referrerPolicy: 'no-referrer'});
+                if (active) trace.http_status = response.status;
+                text = await response.text();
+              } catch { throw transportError(method, 'NETWORK_ERROR', response?.status); }
+              let answer;
+              try { answer = JSON.parse(text); } catch { /* classify without exposing the response */ }
+              const object = answer && typeof answer === 'object' && !Array.isArray(answer);
+              let error;
+              if (object && Object.hasOwn(answer, 'error')) {
+                error = apiError(method, restResult(answer));
+                error.httpStatus = response.status;
+              } else if (!response.ok) error = transportError(method, `HTTP_${response.status}`, response.status);
+              else if (!object || !Object.hasOwn(answer, 'result')) error = transportError(method, 'INVALID_RESPONSE', response.status);
+              if (error) {
+                const retryAfter = response.headers?.get('Retry-After');
+                if (retryAfter) {
+                  const delay = /^\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : Date.parse(retryAfter) - Date.now();
+                  if (Number.isFinite(delay)) error.retryAfterMs = Math.max(0, delay);
+                }
+                throw error;
+              }
+              return restResult(answer);
+            })(),
+            new Promise((resolve, reject) => {
+              timer = setTimeout(() => {
+                active = false;
+                reject(transportError(method, 'REQUEST_TIMEOUT', trace.http_status));
+                controller.abort();
+              }, this.timeoutMs);
+            }),
+          ]);
+        });
+        return result;
+      } catch (error) {
+        active = false;
+        clearTimeout(timer);
+        if (error.code === 'expired_token' && !refreshed) {
+          trace.last_error_code = error.code;
+          trace.phase = 'session';
+          let current;
+          try { current = this.sdk.getAuth(); } catch { /* request a fresh session */ }
+          if (!current?.access_token || current.access_token === auth.access_token) await this._refreshReadAuth(method);
+          refreshed = true;
+          continue;
+        }
+        if (retries < 1 && RETRYABLE_READ_ERRORS.has(error.code) && !(error.retryAfterMs > 5000)) {
+          retries++;
+          trace.last_error_code = error.code;
+          trace.phase = 'retry_wait';
+          await new Promise(resolve => setTimeout(resolve, Math.max(this.readRetryDelayMs, error.retryAfterMs ?? 0)));
+          continue;
+        }
+        throw error;
+      } finally { active = false; clearTimeout(timer); }
+    }
+  }
+
+  async _requestResult(method, params, trace, previous) {
+    // BX24's XHR transport can throw on 5xx/network/HTML without calling back.
+    // Read through REST using the SDK's current session, without patching the SDK.
+    if (READ_METHODS.has(method) && typeof this.sdk.getAuth === 'function' && this.fetch) {
+      return this._fetchRead(method, params, trace);
+    }
+    trace.transport = 'sdk';
+    trace.attempts = (trace.attempts ?? 0) + 1;
+    trace.phase = 'response';
     return new Promise((resolve, reject) => {
       let settled = false;
-      const finish = (error, data) => {
+      const finish = (error, result) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        this._finishTrace(trace, error);
-        error ? reject(error) : resolve(data);
+        error ? reject(error) : resolve(result);
       };
-      const timer = setTimeout(() => {
-        const error = new Error(`Bitrix24: ${method} — время ожидания истекло. Повторите запрос; при повторном сбое скопируйте диагностику из настроек.`);
-        error.code = 'REQUEST_TIMEOUT';
-        finish(error);
-      }, this.timeoutMs);
+      const timer = setTimeout(() => finish(transportError(method, 'REQUEST_TIMEOUT')), this.timeoutMs);
       try {
-        this.sdk.callMethod(method, params, result => {
-          try {
-            if (result.error()) finish(apiError(method, result));
-            else finish(null, result.data());
-          } catch { finish(new Error(`Bitrix24: ${method} — некорректный ответ SDK.`)); }
-        });
-      } catch { finish(new Error(`Bitrix24: ${method} — ошибка транспорта SDK.`)); }
+        if (typeof previous?.next === 'function') previous.next(result => finish(null, result));
+        else this.sdk.callMethod(method, params, result => finish(null, result));
+      } catch { finish(transportError(method, 'SDK_REQUEST_FAILED')); }
     });
   }
 
@@ -339,84 +546,61 @@ export class BitrixAdapter {
     return actual;
   }
 
-  /** SDK Result.more()/next() preserve next offsets for every supported list method. */
+  /** Read each page once; retry only the failed offset, preserving collected rows. */
   async _list(method, params = {}, key = null, {maxItems = Infinity, onPage} = {}) {
     this._guard(method);
     const trace = this._trace(method);
-    return new Promise((resolve, reject) => {
-      const items = [];
-      let pages = 0;
-      let lastOffset = Number(params.start ?? 0);
-      let settled = false;
-      let timer;
-      const finish = (error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        this._finishTrace(trace, error);
-        error ? reject(error) : resolve(items);
-      };
-      const armTimer = () => {
-        clearTimeout(timer);
-        timer = setTimeout(() => {
-          const error = new Error(`Bitrix24: ${method} — время ожидания страницы истекло. Скопируйте диагностику из настроек.`);
-          error.code = 'REQUEST_TIMEOUT';
-          finish(error);
-        }, this.timeoutMs);
-      };
-      const consume = result => {
-        if (settled) return;
+    const items = [];
+    let pages = 0;
+    let lastOffset = Number(params.start ?? 0);
+    let previous;
+    const firstParams = {...params};
+    // Never send duplicate zero offsets through the SDK's Result.next().
+    if (firstParams.start === undefined || Number(firstParams.start) === 0) delete firstParams.start;
+    let pageParams = firstParams;
+    try {
+      for (;;) {
+        const result = await this._requestResult(method, pageParams, trace, previous);
+        let data;
         try {
-          if (result.error()) return finish(apiError(method, result));
-          const data = result.data();
-          let page = key ? data?.[key] : data;
-          // CRM template.list returns templates keyed by ID rather than an array.
-          // Keep every other list method's response validation strict.
-          if (method === 'crm.documentgenerator.template.list' && key === 'templates'
-            && page && typeof page === 'object' && !Array.isArray(page)) {
-            page = Object.values(page);
-          }
-          if (!Array.isArray(page)) return finish(new Error(`Bitrix24: ${method} — нет массива ${key ?? 'result'}.`));
-          items.push(...page);
-          pages += 1;
-          trace.pages = pages;
-          trace.items = items.length;
-          onPage?.(page.length);
-          const total = typeof result.total === 'function' ? result.total() : undefined;
-          if (Number.isSafeInteger(total) && total >= 0) trace.total_items = total;
-          if (items.length > maxItems) {
-            return finish(broadSearchError());
-          }
-          if (pages > 2000) return finish(new Error('Превышен лимит страниц. Уточните поиск в каталоге.'));
-          const more = typeof result.more === 'function' ? result.more() : false;
-          if (!more) return finish();
-          if (!page.length) return finish(new Error(`Bitrix24: ${method} — пустая страница с продолжением.`));
-          // The official SDK exposes the server cursor in answer.next. A repeated
-          // offset means pagination stalled, not that there are more matching items.
-          if (result.answer?.next !== undefined) {
-            const offset = Number(result.answer.next);
-            if (!Number.isSafeInteger(offset) || offset <= lastOffset) {
-              const error = new Error(`Bitrix24: ${method} — повторяется страница списка. Скопируйте диагностику из настроек.`);
-              error.code = 'PAGINATION_STALLED';
-              return finish(error);
-            }
-            lastOffset = offset;
-            trace.next_offset = offset;
-          }
-          armTimer();
-          if (typeof result.next === 'function') result.next(consume);
-          else this.sdk.callMethod(method, { ...params, start: pages * 50 }, consume);
-        } catch { finish(new Error(`Bitrix24: ${method} — ошибка чтения страницы SDK.`)); }
-      };
-      armTimer();
-      // BX24.next() adds its own start. A data.start=0 remains in the official
-      // SDK's cloned query and overrides that cursor (start=50&start=0).
-      // Let the server use its default zero offset on the initial request.
-      const firstParams = {...params};
-      if (firstParams.start === undefined || Number(firstParams.start) === 0) delete firstParams.start;
-      try { this.sdk.callMethod(method, firstParams, consume); }
-      catch { finish(new Error(`Bitrix24: ${method} — ошибка транспорта SDK.`)); }
-    });
+          if (result.error()) throw apiError(method, result);
+          data = result.data();
+        } catch (error) {
+          throw error?.method === method ? error : transportError(method, 'INVALID_RESPONSE');
+        }
+        let page = key ? data?.[key] : data;
+        // CRM template.list returns templates keyed by ID rather than an array.
+        if (method === 'crm.documentgenerator.template.list' && key === 'templates'
+          && page && typeof page === 'object' && !Array.isArray(page)) page = Object.values(page);
+        if (!Array.isArray(page)) throw new Error(`Bitrix24: ${method} — нет массива ${key ?? 'result'}.`);
+        items.push(...page);
+        pages += 1;
+        trace.pages = pages;
+        trace.items = items.length;
+        onPage?.(page.length);
+        const total = typeof result.total === 'function' ? result.total() : undefined;
+        if (Number.isSafeInteger(total) && total >= 0) trace.total_items = total;
+        if (items.length > maxItems) throw broadSearchError();
+        if (pages > 2000) throw new Error('Превышен лимит страниц. Уточните поиск в каталоге.');
+        if (!(typeof result.more === 'function' && result.more())) break;
+        if (!page.length) throw new Error(`Bitrix24: ${method} — пустая страница с продолжением.`);
+        const offset = result.answer?.next === undefined ? pages * 50 : Number(result.answer.next);
+        if (!Number.isSafeInteger(offset) || offset <= lastOffset) {
+          const error = new Error(`Bitrix24: ${method} — повторяется страница списка. Скопируйте диагностику из настроек.`);
+          error.code = 'PAGINATION_STALLED';
+          throw error;
+        }
+        lastOffset = offset;
+        trace.next_offset = offset;
+        pageParams = {...params, start: offset};
+        previous = result;
+      }
+      this._finishTrace(trace);
+      return items;
+    } catch (error) {
+      this._finishTrace(trace, error);
+      throw error;
+    }
   }
 
   async _getCatalogs() {

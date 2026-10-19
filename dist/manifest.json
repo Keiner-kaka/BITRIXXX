@@ -1,11 +1,11 @@
 {
   "name": "ЮЗМ — конструктор КП для Bitrix24",
-  "version": "2.5.0",
+  "version": "2.5.1",
   "validation": {
     "node_test_files_passed": 3,
     "browser_ui_checks_passed": 23,
     "browser_mock_bitrix_checks_passed": 39,
-    "browser_connection_checks_passed": 11,
+    "browser_connection_checks_passed": 21,
     "live_bitrix_tested": false,
     "uploaded_template_preserved": true
   },
@@ -29,11 +29,11 @@
     ]
   },
   "files": {
-    "index.html": "db0d587205ae49fabe2ea24140faeb7dff12f1fe1d286dacb17efcbc7c629127",
+    "index.html": "13465b8b697f65de61aada570861bf4fc9b13bc46f8ef2f25ddd9ee9c1dc3cd1",
     "styles.css": "8ae42204b854c589503db37dfeeb3a35c14499e1cb47c144fcf55e4cbcf91a44",
     "src/app.js": "830e88d61b6ff02bbb18fb3f1da52d6a63a01da7ba765624554c60ac90f29532",
     "src/calculator.js": "796664b3a01f250b937691746981d1c170fc86158a4f5ccf7f04e610f170ff13",
-    "src/bitrix.js": "0d05407ca66a77e2f2288a31b2bf21c5a5ba8382fbbf280f0de7a751f183d026",
+    "src/bitrix.js": "a5198962a989c7c5cc8929891afb4406154ac56fbdfaab504996b19d1bd46d62",
     "src/demo.js": "8063fa1daad50af348f49622d35d342b0634be260462a183cf10d5c660e3b97b",
     "src/sdk-loader.js": "f820e46d0471efe3d06f5e080018cc96a379c78d3cb8ff80c5a72a7a8687bd93",
     "data/coatings.example.json": "0886ea04df7d58fc26ef5a52262daf0e7e8a5c588728664c86ea8d3d9d50629b",
@@ -41,24 +41,24 @@
     "index.php": "41c031910e37d6e0e2903fbc2624d0916a41d031aea7c74d95e2cb4945e9dd94",
     "install.html": "12eb675c13283a07bef79123307ff12f460f01172d9e4a852eaa136f8f0c1cf4",
     "install.php": "65d4e9de9233ed148cfd95b94a817c59bc4b44b4fe785d949cb04f6ef3c3d532",
-    "package.json": "fc5b963815c91254a4f6e861c545855f5bbc60ca37ea0f0fb518f0b0c763bcbc",
-    "README.md": "968412403f3c159f66e3740be4f52ed014125ef7244b9f3c36470539c61f064f",
+    "package.json": "810559ad9ed30b7fd4546e8f633b1998daa1b210ce2f5cc8f290bd16ab4dfcbd",
+    "README.md": "6cd3ef4c966d5ea82e836984eb3fea7046438ba120793770f1ea119a3ed40a0e",
     "data/prices.original.example.json": "4862dc2ba836a6d23227c17a4a18d977c7624dffdccbb04f401bd579ae83f5b1",
     "data/templates/kp-yuzm-bitrix24.docx": "3377040b4cac13004b2587c92d144388df0871aa3e641d1fd236ffb6d534c57c",
-    "docs/contracts.md": "c1ca78f99212f97d98ea6c1d92ebfea7caf777faa1f5047bed7bef31a9c77fbf",
+    "docs/contracts.md": "9d8554863293d6a125e63ef8d79220c2eb9587d1426024f06b12e9d585154986",
     "docs/data-format.md": "af3a832c0fc2af37e9c69247d47235fd0eb1d199874bff7b35a7c11120933a2b",
-    "docs/integration.md": "0678d5198d5d103c72e109a7b6f310e7093a26d5dd0afacee69953065459bbd6",
-    "docs/validation.md": "1b759c091a820b2715709c53264d8323703d11a26b5242954a03e635ddc59473",
-    "tests/bitrix.test.js": "435ede8ec68af9324f37698dcb65f36c2f752133fdcb263623bc7501925ead94",
+    "docs/integration.md": "8fae8561bf88f74a4eeb2344426159b621e0dbb13922a7b55c6116c51ba86325",
+    "docs/validation.md": "217a8284d3f88fccceb665a474f305dca50550ee84faafe0cf2e8d853dd393b4",
+    "tests/bitrix.test.js": "7bfb8d93489d49976a5bfddaed61d9e2877fcccca02dab44364b4514b38e6b08",
     "tests/browser_bitrix.py": "f3484cf551dd1514dbfc7b7a07b386de5a7b51c6d2eda93f3d83620757c8068b",
-    "tests/browser_connection.py": "2d8a8c37822e7a96d440366fb553a9a1dcb6b0beb3a37dd320379fc931690cf1",
+    "tests/browser_connection.py": "481fbb0176c64b16a1bd80edce7c793d2ac58fb92561c9542146a4b46d67fdf3",
     "tests/browser_smoke.py": "28e55ffd3845adc336ab06d902d710559033b0201d4175df57143776397895fb",
     "tests/calculator.test.js": "c61a051856c79433c877e3ef81922b8fa69b5869f110dab657a82b07524f8312",
     "tests/excel-file.test.js": "feded2b46a8cbb61462e2cf0196ad46d58e174883a5366e3fce2b7f18b5fb42f",
     "tests/fixtures/excel-calculation.json": "f82cf8ad0103f8e8585dfa53035248968dd23c0a51f3a648af3777e7900a3fa1",
-    "scripts/package.py": "827533ab392db4e44dd47e048e4a2adaefbfb46c2ba0a1efd13775b66a99edee",
+    "scripts/package.py": "06db186220059032e5750ef555599de8f3d2ab65e19227ad160772b6e9cbb716",
     "dist/prototype.png": "2982e26aee84cfbb312068219825e4cc51c1d18d28c647ca0de14ae3a88eb71d",
     "dist/demo-kp.pdf": "2ac89df217671e37a5775d2e44cbb25adedd67395fdf4b3b63fd8c82c3864fad",
-    "dist/yuzm-kp-bitrix.zip": "b6379b6f35b0042d86bb88fa8531c2b758a97ba1ccb65aa8492f4282358dd717"
+    "dist/yuzm-kp-bitrix.zip": "8b4f0209007cdedc93bf6527790245aa39df04725241cfbcbf9d4c70ba29bba8"
   }
 }

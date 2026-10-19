@@ -990,3 +990,226 @@ test('only an app administrator can save a shared quote template and read-back m
   confirm = false;
   await assert.rejects(api.setQuoteTemplateId('7'), /изменился при сохранении/);
 });
+
+function httpResponse(answer, status = 200, retryAfter = null) {
+  return {status, ok: status >= 200 && status < 300,
+    headers: {get: name => name === 'Retry-After' ? retryAfter : null},
+    text: async () => typeof answer === 'string' ? answer : JSON.stringify(answer)};
+}
+
+async function httpAdapter(fetch, options = {}) {
+  const setup = await adapter({}, {fetch, readSpacingMs: 0, readRetryDelayMs: 0, ...options});
+  setup.sdk.getAuth = () => ({access_token: 'private-access-token', domain: 'portal.example'});
+  return setup;
+}
+
+test('REST reads use the current SDK session in the POST body and preserve nested filters', async () => {
+  const requests = [];
+  const {api, sdk} = await httpAdapter(async (url, options) => {
+    requests.push({url, options});
+    return httpResponse({result: {products: []}});
+  });
+  await api.call('catalog.product.list', {filter: {'@id': [3, 4], active: 'Y'}, select: ['id', 'name']});
+  assert.equal(sdk.calls.length, 0);
+  const {url, options} = requests[0];
+  assert.equal(url, 'https://portal.example/rest/catalog.product.list.json');
+  assert.equal(options.body.get('auth'), 'private-access-token');
+  assert.equal(options.body.get('filter[@id][1]'), '4');
+  assert.equal(options.body.get('select[1]'), 'name');
+  assert.equal(options.credentials, 'omit');
+  assert.equal(options.redirect, 'error');
+  assert.equal(options.referrerPolicy, 'no-referrer');
+  const trace = api.diagnostics()[0];
+  assert.equal(trace.transport, 'rest');
+  assert.equal(trace.http_status, 200);
+  assert.equal(trace.attempts, 1);
+  assert.equal(JSON.stringify(trace).includes('private-'), false);
+  assert.equal(JSON.stringify(trace).includes('portal.example'), false);
+});
+
+test('HTTP 503 REST limit is detected immediately and a successful read retry is diagnosed', async () => {
+  let requests = 0;
+  const {api} = await httpAdapter(async () => ++requests === 1
+    ? httpResponse({error: 'QUERY_LIMIT_EXCEEDED', error_description: 'private-access-token'}, 503)
+    : httpResponse({result: {ID: '12'}}));
+  assert.deepEqual(await api.call('crm.deal.get', {id: 12}), {ID: '12'});
+  const trace = api.diagnostics()[0];
+  assert.equal(requests, 2);
+  assert.equal(trace.state, 'success');
+  assert.equal(trace.attempts, 2);
+  assert.equal(trace.last_error_code, 'QUERY_LIMIT_EXCEEDED');
+  assert.equal(trace.http_status, 200);
+});
+
+test('REST read failures are bounded and never become fabricated permissions errors', async () => {
+  for (const failure of [
+    {response: () => httpResponse({error: 'QUERY_LIMIT_EXCEEDED', error_description: 'private-data'}, 503), code: 'QUERY_LIMIT_EXCEEDED'},
+    {response: () => httpResponse('<html>private-data</html>', 502), code: 'HTTP_502'},
+    {response: () => httpResponse('<html>private-data</html>'), code: 'INVALID_RESPONSE'},
+    {response: () => httpResponse({}), code: 'INVALID_RESPONSE'},
+    {response: () => {throw new Error('private-data');}, code: 'NETWORK_ERROR'},
+  ]) {
+    let requests = 0;
+    const {api} = await httpAdapter(async () => { requests++; return failure.response(); });
+    await assert.rejects(api.call('catalog.catalog.list'), error => error.code === failure.code
+      && !error.message.includes('private-') && !error.message.includes('Проверьте права'));
+    assert.equal(requests, 2);
+    assert.equal(api.diagnostics()[0].code, failure.code);
+    assert.equal(JSON.stringify(api.diagnostics()).includes('private-'), false);
+  }
+});
+
+test('access, licensing, overload and operation blocks are never automatically retried', async () => {
+  for (const code of [200040300010, 'insufficient_scope', 'LICENSE_ERROR', 'OPERATION_TIME_LIMIT', 'OVERLOAD_LIMIT']) {
+    let requests = 0;
+    const {api} = await httpAdapter(async () => {
+      requests++;
+      return httpResponse({error: code, error_description: 'private-data'}, 400);
+    });
+    await assert.rejects(api.call('catalog.catalog.list'), error => error.code === String(code));
+    assert.equal(requests, 1);
+  }
+  let requests = 0;
+  const {api} = await httpAdapter(async () => {
+    requests++;
+    return httpResponse({error: 'QUERY_LIMIT_EXCEEDED'}, 503, '60');
+  });
+  await assert.rejects(api.call('catalog.catalog.list'), {code: 'QUERY_LIMIT_EXCEEDED'});
+  assert.equal(requests, 1);
+  for (const retryAfter of ['60', new Date(Date.now() + 60000).toUTCString()]) {
+    let attempts = 0;
+    const setup = await httpAdapter(async () => {
+      attempts++;
+      return httpResponse('<html>private-data</html>', 429, retryAfter);
+    });
+    await assert.rejects(setup.api.call('catalog.catalog.list'), {code: 'HTTP_429'});
+    assert.equal(attempts, 1);
+  }
+});
+
+test('read timeout aborts the fetch and late responses cannot overwrite the retry result', async () => {
+  let requests = 0, signal, deliverLate;
+  const {api} = await httpAdapter(async (url, options) => {
+    if (++requests === 1) {
+      signal = options.signal;
+      return new Promise(resolve => {deliverLate = resolve;});
+    }
+    return httpResponse({result: {ID: '12'}});
+  }, {timeoutMs: 10});
+  assert.deepEqual(await api.call('crm.deal.get', {id: 12}), {ID: '12'});
+  assert.equal(signal.aborted, true);
+  assert.equal(requests, 2);
+  deliverLate(httpResponse({error: 'QUERY_LIMIT_EXCEEDED'}, 503));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(api.diagnostics()[0].state, 'success');
+  assert.equal(api.diagnostics()[0].http_status, 200);
+  assert.equal(api.diagnostics()[0].last_error_code, 'REQUEST_TIMEOUT');
+  const hung = await httpAdapter(() => new Promise(() => {}), {timeoutMs: 10});
+  await assert.rejects(hung.api.call('catalog.catalog.list'), {code: 'REQUEST_TIMEOUT'});
+  assert.equal(hung.api.diagnostics()[0].attempts, 2);
+});
+
+test('a body that stalls after HTTP headers is also subject to the read timeout', async () => {
+  let requests = 0;
+  const {api} = await httpAdapter(async () => {
+    requests++;
+    return {status: 200, ok: true, text: () => new Promise(() => {})};
+  }, {timeoutMs: 10});
+  await assert.rejects(api.call('catalog.catalog.list'), {code: 'REQUEST_TIMEOUT'});
+  assert.equal(requests, 2);
+  assert.equal(api.diagnostics()[0].http_status, 200);
+});
+
+test('REST pagination retries only the failed cursor and does not duplicate collected rows', async () => {
+  const starts = [];
+  const {api} = await httpAdapter(async (url, options) => {
+    const offset = options.body.get('start');
+    starts.push(offset);
+    if (starts.length === 2) return httpResponse('<html>private-data</html>', 503);
+    return offset === null
+      ? httpResponse({result: {catalogs: [{id: 7}]}, next: 50, total: 2})
+      : httpResponse({result: {catalogs: [{id: 8}]}, total: 2});
+  });
+  assert.deepEqual(await api._getCatalogs(), [{id: 7}, {id: 8}]);
+  assert.deepEqual(starts, [null, '50', '50']);
+  const trace = api.diagnostics()[0];
+  assert.equal(trace.pages, 2);
+  assert.equal(trace.items, 2);
+  assert.equal(trace.attempts, 3);
+  assert.equal(trace.last_error_code, 'HTTP_503');
+  assert.equal(trace.next_offset, 50);
+});
+
+test('REST pagination still rejects repeated cursors, and a failed index can be reloaded', async () => {
+  const {api} = await httpAdapter(async () => httpResponse({result: {catalogs: [{id: 7}]}, next: 50}));
+  await assert.rejects(api._getCatalogs(), {code: 'PAGINATION_STALLED'});
+  assert.equal(api.diagnostics()[0].pages, 2);
+  let broken = true;
+  const setup = await httpAdapter(async () => broken
+    ? httpResponse({error: 'QUERY_LIMIT_EXCEEDED'}, 503)
+    : httpResponse({result: {catalogs: []}}));
+  await assert.rejects(setup.api.listCatalogEntries(), {code: 'QUERY_LIMIT_EXCEEDED'});
+  broken = false;
+  assert.deepEqual(await setup.api.listCatalogEntries(), []);
+});
+
+test('expired read session refreshes through BX24 once and concurrent refreshes are coalesced', async () => {
+  const {api, sdk} = await httpAdapter(async (url, options) => options.body.get('auth') === 'expired-token'
+    ? httpResponse({error: 'expired_token'}, 401) : httpResponse({result: true}));
+  let refreshed = false, refreshes = 0;
+  sdk.getAuth = () => ({access_token: refreshed ? 'fresh-token' : 'expired-token', domain: 'portal.example'});
+  sdk.refreshAuth = callback => {
+    refreshes++;
+    setTimeout(() => {refreshed = true; callback(sdk.getAuth());}, 5);
+  };
+  assert.deepEqual(await Promise.all([api.call('app.info'), api.call('app.option.get')]), [true, true]);
+  assert.equal(refreshes, 1);
+  assert.ok(api.diagnostics().every(trace => trace.attempts === 2 && trace.last_error_code === 'expired_token'));
+  sdk.getAuth = () => ({access_token: 'fresh-token', domain: 'portal.example'});
+  api.fetch = async () => httpResponse({error: 'expired_token'}, 401);
+  await assert.rejects(api.call('app.info'), {code: 'expired_token'});
+  assert.equal(refreshes, 2);
+  assert.equal(api.diagnostics().at(-1).attempts, 2);
+});
+
+test('missing or stalled session refresh fails safely without sending credentials anywhere', async () => {
+  for (const behavior of ['missing', 'stalled', 'invalid-domain']) {
+    let requests = 0;
+    const {api, sdk} = await httpAdapter(async () => {requests++;}, {initTimeoutMs: 10});
+    sdk.getAuth = () => behavior === 'invalid-domain'
+      ? {access_token: 'private-token', domain: 'portal.example/private-path'} : false;
+    if (behavior === 'stalled') sdk.refreshAuth = () => {};
+    await assert.rejects(api.call('app.info'), error => error.code === (behavior === 'stalled' ? 'AUTH_REFRESH_TIMEOUT' : 'AUTH_UNAVAILABLE'));
+    assert.equal(requests, 0);
+  }
+});
+
+test('writes always stay on the SDK transport and are never retried after an ambiguous timeout', async () => {
+  let reads = 0;
+  const {api, sdk} = await httpAdapter(async () => {reads++;}, {timeoutMs: 10});
+  sdk.callMethod = (method, params) => sdk.calls.push({method, params});
+  for (const method of ['app.option.set', 'crm.deal.productrows.set', 'crm.item.productrow.set',
+    'crm.documentgenerator.document.add', 'disk.folder.uploadFile', 'placement.bind']) {
+    const before = sdk.calls.length;
+    await assert.rejects(api.call(method), {code: 'REQUEST_TIMEOUT'});
+    assert.equal(sdk.calls.length, before + 1);
+    assert.equal(api.diagnostics().at(-1).transport, 'sdk');
+    assert.equal(api.diagnostics().at(-1).attempts, 1);
+  }
+  assert.equal(reads, 0);
+});
+
+test('REST read starts are paced across concurrent operations', async () => {
+  const sent = [];
+  const {api} = await httpAdapter(async () => {sent.push(Date.now()); return httpResponse({result: true});}, {readSpacingMs: 25});
+  await Promise.all([api.call('app.info'), api.call('app.option.get'), api.call('crm.deal.get')]);
+  assert.equal(sent.length, 3);
+  assert.ok(sent[1] - sent[0] >= 20);
+  assert.ok(sent[2] - sent[1] >= 20);
+  const separate = await httpAdapter(async url => url.includes('crm.deal.get')
+    ? new Promise(() => {}) : httpResponse({result: true}), {timeoutMs: 30, readSpacingMs: 3});
+  const stalled = assert.rejects(separate.api.call('crm.deal.get'), {code: 'REQUEST_TIMEOUT'});
+  assert.equal(await separate.api.call('app.info'), true);
+  assert.equal(separate.api.diagnostics()[0].state, 'pending');
+  await stalled;
+});

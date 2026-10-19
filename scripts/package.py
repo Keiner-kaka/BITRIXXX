@@ -75,7 +75,7 @@ def build():
             'node_test_files_passed': 3,
             'browser_ui_checks_passed': 23,
             'browser_mock_bitrix_checks_passed': 39,
-            'browser_connection_checks_passed': 11,
+            'browser_connection_checks_passed': 21,
             'live_bitrix_tested': False,
             'uploaded_template_preserved': True,
         },

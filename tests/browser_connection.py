@@ -23,21 +23,28 @@ def passed(message):
     print('PASS:', message, flush=True)
 
 
-def harness(named=True, delay=0):
-    data = {'DOMAIN': DOMAIN, 'PROTOCOL': 0, 'PATH': '/rest', 'LANG': 'ru',
+def harness(named=True, delay=0, portal_base=BASE, app_base=BASE):
+    portal_domain = urlparse(portal_base).netloc
+    protocol = 1 if urlparse(portal_base).scheme == 'https' else 0
+    data = {'DOMAIN': portal_domain, 'PROTOCOL': protocol, 'PATH': '/rest', 'LANG': 'ru',
             'AUTH_ID': 'test-only-token', 'AUTH_EXPIRES': 3600, 'IS_ADMIN': True,
             'INSTALL': False, 'USER_OPTIONS': {}, 'APP_OPTIONS': {}, 'PLACEMENT_OPTIONS': {}}
-    name = DOMAIN + '|0|test-only-frame-sid' if named else ''
+    name = portal_domain + f'|{protocol}|test-only-frame-sid' if named else ''
     return '''<!doctype html><meta charset="utf-8"><script>
       window.addEventListener('message', event => {
-        if (event.origin !== location.origin || typeof event.data !== 'string') return;
+        if (event.origin !== APP_ORIGIN || typeof event.data !== 'string') return;
         const parts = event.data.split(':');
         if (parts[0] === 'getInitData') setTimeout(() => {
           event.source.postMessage(parts[2] + ':' + JSON.stringify(INIT_DATA), event.origin);
         }, INIT_DELAY);
+        if (parts[0] === 'refreshAuth') setTimeout(() => {
+          event.source.postMessage(parts[2] + ':' + JSON.stringify({...INIT_DATA,
+            AUTH_ID: 'test-only-refreshed-token', AUTH_EXPIRES: 3600}), event.origin);
+        }, 10);
       });
-    </script><iframe name="FRAME_NAME" src="index.html" style="width:1400px;height:950px"></iframe>'''.replace(
-        'INIT_DATA', json.dumps(data)).replace('INIT_DELAY', str(delay)).replace('FRAME_NAME', name)
+    </script><iframe name="FRAME_NAME" src="APP_URL" style="width:1400px;height:950px"></iframe>'''.replace(
+        'INIT_DATA', json.dumps(data)).replace('INIT_DELAY', str(delay)).replace('FRAME_NAME', name).replace(
+        'APP_ORIGIN', json.dumps(app_base.rstrip('/'))).replace('APP_URL', app_base + 'index.html')
 
 
 def diagnostics(frame):
@@ -45,6 +52,7 @@ def diagnostics(frame):
     value = frame.locator('#connectionDiagnostics').input_value()
     frame.locator('#closeSettingsBtn').click()
     assert 'test-only-token' not in value
+    assert 'test-only-refreshed-token' not in value
     assert 'test-only-frame-sid' not in value
     assert DOMAIN not in value
     return json.loads(value)
@@ -53,14 +61,27 @@ def diagnostics(frame):
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True, executable_path='/usr/bin/chromium', args=['--no-sandbox'])
 
-    def scenario(named=True, delay=0, blocked=None, api_result=None, suspended=False, api_routes=None):
+    def scenario(named=True, delay=0, blocked=None, api_result=None, suspended=False, api_routes=None, http_routes=None,
+                 portal_base=BASE, app_base=BASE, cors=True):
         context = browser.new_context(locale='ru-RU', viewport={'width': 1450, 'height': 1100})
         page = context.new_page()
         requests, errors, held = [], [], []
         control = {'blocked': set(blocked or [])}
         page.on('pageerror', lambda error: errors.append(str(error)))
-        page.route(BASE + 'connection-test.html', lambda route: route.fulfill(
-            status=200, content_type='text/html', body=harness(named, delay)))
+        if app_base != BASE:
+            # Virtual public HTTPS hosts model CDN/portal CORS without routing
+            # a synthetic public parent into Chromium's private loopback network.
+            runtime = Path(os.environ.get('YUZM_TEST_ROOT', '/workspace/BITRIXXX'))
+            def app_file(route):
+                relative = urlparse(route.request.url).path.lstrip('/')
+                assert '..' not in Path(relative).parts
+                route.fulfill(path=str(runtime / relative))
+            page.route(app_base + '**', app_file)
+        page.route(portal_base + 'connection-test.html', lambda route: route.fulfill(
+            status=200, content_type='text/html', body=harness(named, delay, portal_base, app_base)))
+        # Playwright supplies a permissive origin when a fulfilled response
+        # omits it, so use an explicitly mismatched origin for the denial case.
+        cors_headers = {'Access-Control-Allow-Origin': app_base.rstrip('/') if cors else 'https://unrelated.example'}
 
         def library(route):
             requests.append(route.request.url)
@@ -74,23 +95,38 @@ with sync_playwright() as p:
         page.route('https://api.bitrix24.com/**', library)
 
         def api(route):
+            if route.request.method == 'OPTIONS':
+                route.fulfill(status=204, headers={**cors_headers, 'Access-Control-Allow-Methods': 'POST',
+                    'Access-Control-Allow-Headers': 'content-type, cache-control, pragma'})
+                return
             requests.append(route.request.url.split('?')[0])
             method = urlparse(route.request.url).path.split('/rest/', 1)[-1].removesuffix('.json')
+            if method in (http_routes or {}):
+                answer = http_routes[method]
+                if callable(answer):
+                    answer = answer(parse_qs(route.request.post_data or '', keep_blank_values=True))
+                if answer.get('abort'):
+                    route.abort()
+                else:
+                    body = answer['body']
+                    route.fulfill(status=answer.get('status', 200), content_type=answer.get('content_type', 'application/json'),
+                                  headers=cors_headers, body=body if isinstance(body, str) else json.dumps(body))
+                return
             if method in (api_routes or {}):
                 answer = api_routes[method]
                 if callable(answer):
                     answer = answer(parse_qs(route.request.post_data or '', keep_blank_values=True))
                 route.fulfill(status=400 if 'error' in answer else 200,
-                              content_type='application/json', body=json.dumps(answer))
+                              headers=cors_headers, content_type='application/json', body=json.dumps(answer))
                 return
             if '/rest/app.option.get' in route.request.url:
-                route.fulfill(status=200, content_type='application/json', body=json.dumps({'result':None}))
+                route.fulfill(status=200, headers=cors_headers, content_type='application/json', body=json.dumps({'result':None}))
                 return
             assert '/rest/app.info' in route.request.url, route.request.url
-            route.fulfill(status=200, content_type='application/json', body=json.dumps(
+            route.fulfill(status=200, headers=cors_headers, content_type='application/json', body=json.dumps(
                 api_result if api_result is not None else {'result': {'ID': '99', 'INSTALLED': True}}))
-        page.route(BASE + 'rest/**', api)
-        page.goto(BASE + 'connection-test.html', wait_until='domcontentloaded')
+        page.route(portal_base + 'rest/**', api)
+        page.goto(portal_base + 'connection-test.html', wait_until='domcontentloaded')
         return context, page, page.frame_locator('iframe'), requests, errors, control, held
 
     context, page, frame, calls, errors, control, held = scenario(blocked=['api.bitrix24.tech'])
@@ -287,6 +323,143 @@ with sync_playwright() as p:
     assert not errors, errors
     context.close()
     passed('actual SDK exposes all 550 variations, including an unrelated parent, and locally filters without a 500 limit')
+
+    transient_calls = []
+    def transient_catalog(params):
+        transient_calls.append(params)
+        assert params.get('auth') == ['test-only-token']
+        if len(transient_calls) == 1:
+            return {'status': 503, 'body': {'error': 'QUERY_LIMIT_EXCEEDED', 'error_description': 'private-data'}}
+        return {'body': catalog_routes['catalog.catalog.list']}
+
+    context, page, frame, calls, errors, control, held = scenario(
+        api_routes=catalog_routes, http_routes={'catalog.catalog.list': transient_catalog})
+    expect(frame.locator('#connectionBadge')).to_contain_text('подключён')
+    frame.locator('#addItemBtn').click()
+    expect(frame.locator('#productResults .catalog-result')).to_have_count(1)
+    frame.locator('#closeProductBtn').click()
+    trace = next(row for row in diagnostics(frame)['rest_requests'] if row['method'] == 'catalog.catalog.list')
+    assert trace['state'] == 'success' and trace['attempts'] == 2
+    assert trace['transport'] == 'rest' and trace['http_status'] == 200
+    assert trace['last_error_code'] == 'QUERY_LIMIT_EXCEEDED'
+    assert len(transient_calls) == 2 and not errors, errors
+    context.close()
+    passed('HTTP 503 limit recovers with one read retry using the actual SDK session, without a callback timeout')
+
+    for status, answer, code in [
+        (503, {'error': 'QUERY_LIMIT_EXCEEDED', 'error_description': 'private-data'}, 'QUERY_LIMIT_EXCEEDED'),
+        (502, '<html>private-data</html>', 'HTTP_502'),
+        (200, '<html>private-data</html>', 'INVALID_RESPONSE'),
+    ]:
+        context, page, frame, calls, errors, control, held = scenario(
+            http_routes={'catalog.catalog.list': {'status': status, 'body': answer}})
+        expect(frame.locator('#connectionBadge')).to_contain_text('подключён')
+        frame.locator('#addItemBtn').click()
+        expect(frame.locator('#productResults')).to_contain_text('catalog.catalog.list — ' + code)
+        assert 'private-data' not in frame.locator('#productResults').inner_text()
+        frame.locator('#closeProductBtn').click()
+        trace = diagnostics(frame)['rest_requests'][-1]
+        assert trace['state'] == 'error' and trace['code'] == code and trace['attempts'] == 2
+        assert trace['http_status'] == status
+        assert sum('/rest/catalog.catalog.list' in call for call in calls) == 2
+        assert not errors, errors
+        context.close()
+        passed(f'persistent {code} is reported safely after two attempts instead of an unexplained SDK timeout')
+
+    aborted_calls = []
+    def interrupted_catalog(params):
+        aborted_calls.append(params)
+        return {'abort': True} if len(aborted_calls) == 1 else {'body': catalog_routes['catalog.catalog.list']}
+
+    context, page, frame, calls, errors, control, held = scenario(
+        api_routes=catalog_routes, http_routes={'catalog.catalog.list': interrupted_catalog})
+    expect(frame.locator('#connectionBadge')).to_contain_text('подключён')
+    frame.locator('#addItemBtn').click()
+    expect(frame.locator('#productResults .catalog-result')).to_have_count(1)
+    frame.locator('#closeProductBtn').click()
+    trace = next(row for row in diagnostics(frame)['rest_requests'] if row['method'] == 'catalog.catalog.list')
+    assert trace['state'] == 'success' and trace['last_error_code'] == 'NETWORK_ERROR'
+    assert trace['attempts'] == 2 and len(aborted_calls) == 2 and not errors, errors
+    context.close()
+    passed('an interrupted browser request retries reading once without throwing an unhandled SDK error')
+
+    retried_starts = []
+    def interrupted_page(params):
+        offset = params.get('start', ['0'])
+        retried_starts.append(offset)
+        if len(retried_starts) == 2:
+            return {'status': 503, 'body': '<html>private-data</html>'}
+        return {'body': {'result': {'products': [{'id': 100 + int(offset[-1]), 'type': 1, 'name': 'Позиция ' + offset[-1]}]},
+                         **({'next': 50} if offset == ['0'] else {}), 'total': 2}}
+
+    context, page, frame, calls, errors, control, held = scenario(
+        api_routes=catalog_routes, http_routes={'catalog.product.list': interrupted_page})
+    expect(frame.locator('#connectionBadge')).to_contain_text('подключён')
+    frame.locator('#addItemBtn').click()
+    expect(frame.locator('#productResults .catalog-result')).to_have_count(2, timeout=10000)
+    assert retried_starts == [['0'], ['50'], ['50']], retried_starts
+    frame.locator('#closeProductBtn').click()
+    trace = next(row for row in diagnostics(frame)['rest_requests'] if row['method'] == 'catalog.product.list')
+    assert trace['pages'] == 2 and trace['items'] == 2 and trace['attempts'] == 3
+    assert trace['last_error_code'] == 'HTTP_503' and not errors, errors
+    context.close()
+    passed('only the failed second page is retried; the catalog has no duplicate entries or repeated first page')
+
+    session_calls = []
+    def expired_catalog(params):
+        session_calls.append(params['auth'])
+        if len(session_calls) == 1:
+            return {'status': 401, 'body': {'error': 'expired_token'}}
+        assert params['auth'] == ['test-only-refreshed-token']
+        return {'body': catalog_routes['catalog.catalog.list']}
+
+    context, page, frame, calls, errors, control, held = scenario(
+        api_routes=catalog_routes, http_routes={'catalog.catalog.list': expired_catalog})
+    expect(frame.locator('#connectionBadge')).to_contain_text('подключён')
+    frame.locator('#addItemBtn').click()
+    expect(frame.locator('#productResults .catalog-result')).to_have_count(1)
+    frame.locator('#closeProductBtn').click()
+    trace = next(row for row in diagnostics(frame)['rest_requests'] if row['method'] == 'catalog.catalog.list')
+    assert trace['last_error_code'] == 'expired_token' and trace['attempts'] == 2
+    assert session_calls == [['test-only-token'], ['test-only-refreshed-token']]
+    assert not errors, errors
+    context.close()
+    passed('an expired session is refreshed by the actual SDK through the parent portal and reading resumes with the new token')
+
+    context, page, frame, calls, errors, control, held = scenario(
+        http_routes={'app.option.set': {'status': 503, 'body': {'error': 'QUERY_LIMIT_EXCEEDED'}}})
+    expect(frame.locator('#connectionBadge')).to_contain_text('подключён')
+    result = page.frames[1].evaluate('''async () => {
+      const {BitrixAdapter} = await import('./src/bitrix.js');
+      const api = new BitrixAdapter({timeoutMs: 100}); await api.init();
+      try {await api.call('app.option.set', {options: {example: 'value'}});}
+      catch(error) {return {code: error.code, trace: api.diagnostics()[0]};}
+    }''')
+    assert result['code'] == 'REQUEST_TIMEOUT'
+    assert result['trace']['transport'] == 'sdk' and result['trace']['attempts'] == 1
+    assert sum('/rest/app.option.set' in call for call in calls) == 1
+    assert errors == ['Uncaught Query error!'], errors
+    context.close()
+    passed('an ambiguous write failure stays on the SDK transport and is sent exactly once')
+
+    cross_portal, cross_app = 'https://portal.example/', 'https://app.example/'
+    context, page, frame, calls, errors, control, held = scenario(
+        api_routes=catalog_routes, portal_base=cross_portal, app_base=cross_app)
+    expect(frame.locator('#connectionBadge')).to_contain_text('подключён')
+    frame.locator('#addItemBtn').click()
+    expect(frame.locator('#productResults .catalog-result')).to_have_count(1)
+    assert any(call.startswith(cross_portal + 'rest/') for call in calls)
+    assert not errors, errors
+    context.close()
+    passed('REST reading works across different app and portal origins with CORS and the current SDK session')
+
+    context, page, frame, calls, errors, control, held = scenario(portal_base=cross_portal, app_base=cross_app, cors=False)
+    expect(frame.locator('#connectionMessage')).to_contain_text('NETWORK_ERROR')
+    report = diagnostics(frame)
+    assert report['connection_code'] == 'NETWORK_ERROR'
+    assert report['rest_requests'][0]['attempts'] == 2 and not errors, errors
+    context.close()
+    passed('CORS refusal is a bounded network error instead of an unexplained SDK timeout')
 
     browser.close()
 print(f'{len(checks)} connection browser checks passed.')
