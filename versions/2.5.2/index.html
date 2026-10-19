@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#4267e9">
+  <meta name="application-version" content="2.5.2">
+  <title>ЮЗМ · Конструктор коммерческого предложения</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="src/sdk-loader.js"></script>
+</head>
+<body>
+  <svg class="svg-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="icon-document" viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></symbol>
+    <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="icon-gear" viewBox="0 0 24 24"><path d="m10 3-1 3-3 1-2 3 2 2v3l3 2 1 3h4l1-3 3-2v-3l2-2-2-3-3-1-1-3z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></symbol>
+    <symbol id="icon-history" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 3 8M3 4v7h7M12 7v5l3 2"/></symbol>
+    <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></symbol>
+    <symbol id="icon-building" viewBox="0 0 24 24"><path d="M4 21V3h10v18M14 9h6v12M8 7h2M8 11h2M8 15h2M17 13h1M17 17h1M3 21h18"/></symbol>
+    <symbol id="icon-arrow" viewBox="0 0 24 24"><path d="M4 12h16m-6-6 6 6-6 6"/></symbol>
+  </svg>
+
+  <main class="workspace">
+    <article class="proposal-card" aria-labelledby="pageTitle">
+      <header class="page-header">
+        <div class="page-heading">
+          <div class="title-line"><h1 id="pageTitle">Конструктор коммерческого предложения</h1><span id="dealBadge" class="deal-badge">Демо-сделка</span></div>
+          <p class="page-caption">Товары, расчёт стоимости и варианты предложения в одной сделке</p>
+        </div>
+        <div class="header-actions">
+          <span id="connectionBadge" class="badge badge-demo"><span class="badge-dot"></span>Пилот · демоданные</span>
+          <button id="settingsBtn" class="button icon-button" type="button" aria-label="Открыть настройки" title="Настройки"><svg class="icon"><use href="#icon-gear"/></svg></button>
+          <button id="saveBtn" class="button primary" type="button"><svg class="icon"><use href="#icon-check"/></svg>Сохранить версию</button>
+        </div>
+      </header>
+
+      <section id="connectionPanel" class="connection-panel" aria-label="Подключение к Битрикс24" hidden>
+        <p id="connectionMessage" role="status" aria-live="polite"></p>
+        <button id="retryConnectionBtn" class="button secondary" type="button">Повторить подключение</button>
+      </section>
+
+      <section class="customer-section" aria-label="Данные предложения">
+        <div class="field company-field"><label for="companyName">Наименование компании</label><div class="input-with-icon"><svg class="icon"><use href="#icon-building"/></svg><input id="companyName" type="text" placeholder="Название компании" autocomplete="organization"></div></div>
+      </section>
+
+      <section class="variant-section" aria-label="Варианты коммерческого предложения">
+        <div class="field variant-field"><label for="variantSelect">Вариант КП</label><select id="variantSelect" aria-label="Выбрать вариант КП"></select></div>
+        <div class="field variant-name-field"><label for="variantName">Название варианта</label><input id="variantName" type="text" placeholder="Например, основное предложение" maxlength="120"></div>
+        <div class="variant-actions">
+          <button id="newVariantBtn" class="button quiet" type="button"><svg class="icon"><use href="#icon-plus"/></svg>Новый вариант</button>
+          <button id="duplicateVariantBtn" class="button quiet" type="button" title="Создать вариант на основе текущего"><svg class="icon"><use href="#icon-copy"/></svg>Копия</button>
+          <button id="historyBtn" class="button quiet" type="button"><svg class="icon"><use href="#icon-history"/></svg>История</button>
+        </div>
+      </section>
+
+      <section class="items-section" aria-label="Состав коммерческого предложения">
+        <div class="items-scroll">
+          <div id="columnHeaders" class="column-headers" aria-hidden="true">
+            <span>Наименование и базовая цена</span><span>Покрытие</span><span>Кол-во</span><span>Коэффициенты</span><span>Срок исполнения</span><span></span>
+          </div>
+          <div id="itemsBody" class="items-body"></div>
+        </div>
+        <div class="items-footer">
+          <button id="addItemBtn" class="button text-button" type="button"><svg class="icon"><use href="#icon-plus"/></svg>Добавить изделие</button>
+          <div class="totals"><span id="quantityTotal" class="quantity-total">0 изделий</span><span class="total-caption">Расчётная сумма КП <strong id="grandTotal">0,00 ₽</strong></span></div>
+        </div>
+      </section>
+
+      <div id="status" class="status" role="status" aria-live="polite" hidden></div>
+
+      <section class="template-section" aria-label="Шаблон коммерческого предложения">
+        <p id="templateSummary" class="hint" role="status" aria-live="polite">Общий шаблон КП задаётся в настройках приложения.</p>
+      </section>
+
+      <section class="terms-section" aria-labelledby="documentFieldsTitle">
+        <div class="terms-heading"><h2 id="documentFieldsTitle">Условия КП</h2><p class="hint">Выберите формулировку или отредактируйте текст. Условия сохраняются в текущем варианте КП и подставляются в документ.</p></div>
+        <div class="form-grid document-fields">
+          <div class="field payment-terms-field">
+            <label for="paymentTermsPreset">Вариант оплаты</label>
+            <select id="paymentTermsPreset"><option value="">Своя формулировка</option><option value="40_60">40% / 60%</option><option value="50_50">50% / 50%</option><option value="100">100% предоплата</option></select>
+            <label for="YuzmPaymentTerms">Условия оплаты</label>
+            <textarea id="YuzmPaymentTerms" rows="3" placeholder="Укажите условия оплаты"></textarea>
+          </div>
+          <div class="field"><label for="fastenerTermsPreset">Условия по метизам</label><select id="fastenerTermsPreset"><option value="">Свой текст</option><option value="bolts">Крепеж на базе болтов включен</option><option value="excluded">Крепеж в комплект не входит</option><option value="studs">Крепеж на базе шпилек включен</option></select><label for="YuzmFastenerTerms">Текст для КП</label><textarea id="YuzmFastenerTerms" rows="3" placeholder="Укажите условия по метизам"></textarea></div>
+          <div class="field"><div class="term-label-row"><label for="YuzmDocumentsTerms">Документы к поставке</label><button class="button quiet term-preset" type="button" data-term-preset="YuzmDocumentsTerms" aria-label="Подставить образец условий по документам к поставке">По образцу</button></div><textarea id="YuzmDocumentsTerms" rows="3" placeholder="Укажите документы к поставке"></textarea></div>
+          <div class="field"><div class="term-label-row"><label for="YuzmDeliveryTerms">Условия доставки</label><button class="button quiet term-preset" type="button" data-term-preset="YuzmDeliveryTerms" aria-label="Подставить образец условий доставки">По образцу</button></div><textarea id="YuzmDeliveryTerms" rows="3" placeholder="Укажите адрес и условия доставки"></textarea></div>
+          <div class="field wide"><div class="term-label-row"><label for="YuzmValidityTerms">Срок действия КП</label><button class="button quiet term-preset" type="button" data-term-preset="YuzmValidityTerms" aria-label="Подставить образец срока действия КП">По образцу</button></div><textarea id="YuzmValidityTerms" rows="2" placeholder="Укажите срок действия предложения"></textarea></div>
+        </div>
+        <details class="manager-details">
+          <summary>Подпись менеджера <span id="managerSummary" class="hint">Можно заполнить вручную</span></summary>
+          <p id="managerProfileHint" class="hint" role="status"></p>
+          <button id="fillManagerBtn" class="button quiet" type="button">Подставить данные ответственного</button>
+          <div class="form-grid">
+            <div class="field"><label for="YuzmManagerPosition">Должность менеджера</label><input id="YuzmManagerPosition" type="text" placeholder="Необязательно" autocomplete="organization-title"></div>
+            <div class="field"><label for="YuzmManagerName">ФИО менеджера</label><input id="YuzmManagerName" type="text" placeholder="Необязательно" autocomplete="name"></div>
+            <div class="field"><label for="YuzmManagerEmail">Почта менеджера</label><input id="YuzmManagerEmail" type="email" placeholder="Необязательно" autocomplete="email"></div>
+            <div class="field"><label for="YuzmManagerPhone">Телефон менеджера</label><input id="YuzmManagerPhone" type="tel" placeholder="Необязательно" autocomplete="tel"></div>
+          </div>
+          <div class="manager-signature-settings">
+            <label class="mini-label" for="managerSignatureSource">Изображение подписи ответственного: ID файла на Диске Битрикс24</label>
+            <input id="managerSignatureSource" type="text" placeholder="Например, 12345" inputmode="numeric" autocomplete="off">
+            <button id="saveManagerSignatureBtn" type="button" class="button secondary small">Сохранить подпись сотрудника</button>
+            <p id="managerSignatureHint" class="hint" role="status"></p>
+          </div>
+          <div id="managerSignaturePreview"></div>
+        </details>
+      </section>
+
+      <section class="quote-banner" aria-label="Формирование коммерческого предложения">
+        <span class="document-icon"><svg class="icon"><use href="#icon-document"/></svg></span>
+        <div class="quote-banner-copy"><h2>Коммерческое предложение</h2><p id="formulaHint">Базовая цена × К1 × К2 × К3 × количество</p></div>
+        <div class="quote-actions"><button id="applyDealBtn" class="button secondary" type="button"><svg class="icon"><use href="#icon-arrow"/></svg>В товары сделки</button><button id="createQuoteBtn" class="button primary" type="button"><svg class="icon"><use href="#icon-document"/></svg>Предпросмотр КП</button></div>
+      </section>
+
+      <section class="documents-section" aria-labelledby="docsTitle">
+        <div class="section-header"><div><h2 id="docsTitle">Версии и документы КП</h2><p>Сохранённые версии и документы, созданные в Битрикс24</p></div><button id="downloadBtn" class="button secondary small" type="button"><svg class="icon"><use href="#icon-download"/></svg>Скачать расчёт</button></div>
+        <div id="docsBody" class="documents-body"><p class="empty-state">Сохранённые версии и созданные документы КП появятся здесь.</p></div>
+      </section>
+
+    </article>
+    <p class="workspace-note">ЮЗМ <span aria-hidden="true">·</span> Пилот конструктора КП <span aria-hidden="true">·</span> Данные примера можно заменить справочниками с Диска Bitrix24</p>
+  </main>
+
+  <dialog id="settingsDialog" class="dialog settings-dialog" aria-labelledby="settingsTitle">
+    <div class="dialog-header"><div><span class="eyebrow">Конструктор КП</span><h2 id="settingsTitle">Настройки</h2></div><button id="closeSettingsBtn" class="button icon-button" type="button" aria-label="Закрыть настройки"><svg class="icon"><use href="#icon-close"/></svg></button></div>
+    <form id="settingsForm">
+      <div class="dialog-content">
+        <section class="settings-section" aria-labelledby="connectionSettingsTitle">
+          <h3 id="connectionSettingsTitle">Соединение с Битрикс24</h3>
+          <p id="connectionSummary" class="hint" role="status">Проверка подключения…</p>
+          <button id="checkConnectionBtn" class="button secondary" type="button">Проверить соединение</button>
+          <details><summary>Диагностика подключения</summary>
+            <p class="hint">Состояние подключения и последние запросы: методы, время, число страниц и коды ошибок. Токены, ключи и содержимое товаров не включаются.</p>
+            <textarea id="connectionDiagnostics" rows="8" readonly aria-label="Диагностика подключения"></textarea>
+            <button id="copyConnectionDiagnosticsBtn" class="button secondary" type="button">Скопировать диагностику</button>
+          </details>
+        </section>
+        <section class="settings-section"><h3>Расчёт</h3><div class="form-grid"><div class="field"><label for="formulaMode">Формула</label><select id="formulaMode"><option value="catalog">Каталог: базовая цена × К1 × К2 × К3</option><option value="excel">Excel: (цена за кг × вес × К1 × К2 × К3 + метизы) × количество</option></select></div><div class="field"><label for="roundingMode">Округление до копеек</label><select id="roundingMode"><option value="line">По сумме строки</option><option value="unit">Сначала цена единицы</option></select></div></div><p class="hint">В режиме Excel сумма строки = (цена за кг × вес одного изделия × К1 × К2 × К3 + метизы на одно изделие) × количество. К3 — коэффициент покраски и покрытия. Метизы добавляются после применения коэффициентов. Наименование покрытия подставляется в КП и не изменяет цену.</p></section>
+        <section class="settings-section"><h3>Подключение к сделке Bitrix24</h3><div class="form-grid"><div class="field"><label for="dealIdInput">ID сделки</label><input id="dealIdInput" type="text" inputmode="numeric" placeholder="Например, 1048" autocomplete="off"></div><div class="field button-field"><button id="connectDealBtn" class="button secondary" type="button">Открыть данные сделки</button></div></div><p class="hint">Вкладка установленного приложения получает ID сделки автоматически. Для запросов REST используются права приложения.</p><button id="registerPlacementBtn" class="button secondary" type="button">Зарегистрировать вкладку в сделке</button></section>
+        <section class="settings-section" aria-labelledby="documentSettingsTitle">
+          <h3 id="documentSettingsTitle">Документы КП в Битрикс24</h3>
+          <div class="field"><label for="defaultDocumentTemplateId">Общий шаблон КП</label><select id="defaultDocumentTemplateId" aria-describedby="defaultDocumentTemplateHint templatesHint"><option value="">Выберите зарегистрированный шаблон</option></select></div>
+          <p id="defaultDocumentTemplateHint" class="hint">Один шаблон для всех менеджеров приложения. Администратор может изменить его и сохранить настройки.</p>
+          <button id="refreshTemplatesBtn" class="button secondary" type="button">Обновить шаблоны</button>
+          <p id="templatesHint" class="hint" role="status" aria-live="polite">Шаблоны загружаются после подключения сделки.</p>
+        </section>
+        <section class="settings-section" aria-labelledby="metalPricesTitle">
+          <h3 id="metalPricesTitle">Цены металла</h3>
+          <div class="form-grid">
+            <div class="field"><label for="metalPricesFileId">ID JSON-файла цен металла на Диске Bitrix24</label><input id="metalPricesFileId" type="text" inputmode="numeric" pattern="[1-9][0-9]*" placeholder="Например, 2100" autocomplete="off" aria-describedby="metalPricesHint"></div>
+            <div class="field"><label for="localMetalPricesInput">Импорт цен металла с компьютера</label><input id="localMetalPricesInput" class="file-input" type="file" accept=".json,application/json" aria-describedby="metalPricesHint"></div>
+          </div>
+          <p id="metalPricesHint" class="hint">JSON-файл содержит цены за 1 кг в поле <code>prices_per_kg</code>, где ключи — ID товаров каталога Bitrix24. Валюта задаётся в поле <code>currency</code>, например <code>RUB</code>. Наименования покрытий загружаются отдельно.</p>
+          <p id="metalPricesSummary" class="hint" role="status" aria-live="polite">Демонстрационный справочник цен металла</p>
+          <button id="loadMetalPricesBtn" class="button secondary" type="button">Загрузить цены металла с Диска</button>
+        </section>
+        <section class="settings-section"><h3>Справочники на Диске Bitrix24</h3><div class="form-grid"><div class="field"><label for="pricesFileId">ID JSON-файла покрытий</label><input id="pricesFileId" type="text" inputmode="numeric" placeholder="Наименования покрытий" autocomplete="off"></div><div class="field wide"><label for="historyFolderId">ID папки для сохранения версий КП</label><input id="historyFolderId" type="text" inputmode="numeric" placeholder="Папка на Диске с доступом для менеджеров" autocomplete="off"></div></div><p class="hint">Без настроенной папки история сохраняется в этом браузере. Файлы пилота находятся в папке data приложения.</p><button id="loadRemoteBtn" class="button secondary" type="button">Загрузить справочники с Диска</button></section>
+        <section class="settings-section"><h3>Импорт JSON с компьютера</h3><div class="form-grid"><div class="field"><label for="localPricesInput">Наименования покрытий</label><input id="localPricesInput" class="file-input" type="file" accept=".json,application/json"></div></div></section>
+        <section class="settings-section"><h3>Проверка каталога</h3><div class="search-line"><select id="catalogSearchMode" class="search-mode" aria-label="Способ поиска в каталоге"><option value="name">По названию</option><option value="id">По ID</option></select><label class="sr-only" for="catalogQuery">Название товара или ID</label><input id="catalogQuery" type="search" placeholder="Название или часть названия" autocomplete="off"><button id="searchCatalogBtn" class="button secondary" type="button">Найти</button></div><button id="refreshCatalogSettingsBtn" class="button secondary small" type="button">Обновить каталог</button><div id="catalogResults" class="result-list"></div></section>
+        <div id="settingsError" class="inline-error" role="alert" hidden></div>
+      </div>
+      <div class="dialog-footer"><button id="resetDemoBtn" class="button quiet" type="button">Восстановить демоданные</button><button class="button primary" type="submit">Сохранить настройки</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="historyDialog" class="dialog" aria-labelledby="historyTitle"><div class="dialog-header"><div><span class="eyebrow">Варианты предложения</span><h2 id="historyTitle">История изменений</h2></div><button id="closeHistoryBtn" class="button icon-button" type="button" aria-label="Закрыть историю"><svg class="icon"><use href="#icon-close"/></svg></button></div><div id="historyBody" class="dialog-content history-body"></div></dialog>
+
+  <dialog id="productDialog" class="dialog" aria-labelledby="productTitle"><div class="dialog-header"><div><span class="eyebrow">Товары для предложения</span><h2 id="productTitle">Добавить изделие</h2></div><button id="closeProductBtn" class="button icon-button" type="button" aria-label="Закрыть выбор изделия"><svg class="icon"><use href="#icon-close"/></svg></button></div><div class="dialog-content"><div class="search-line"><select id="productSearchMode" class="search-mode" aria-label="Способ поиска изделия"><option value="name">По названию</option><option value="id">По ID</option></select><label class="sr-only" for="productQuery">Название изделия или ID</label><input id="productQuery" type="search" placeholder="Название или часть названия" autocomplete="off"><button id="productSearchBtn" class="button primary" type="button">Найти</button></div><button id="refreshCatalogBtn" class="button secondary small" type="button">Обновить каталог</button><div id="productResults" class="result-list product-results"></div></div></dialog>
+
+  <dialog id="quoteDialog" class="dialog quote-dialog" aria-labelledby="quoteTitle">
+    <div class="dialog-header"><div><span class="eyebrow">Предпросмотр КП</span><h2 id="quoteTitle">Коммерческое предложение</h2></div><button id="closeQuoteBtn" class="button icon-button" type="button" aria-label="Закрыть предложение"><svg class="icon"><use href="#icon-close"/></svg></button></div>
+    <div id="quotePreview" class="quote-preview"></div>
+    <div class="dialog-footer">
+      <div class="quote-result"><p class="hint">Создайте документ в Битрикс24. Ссылки для скачивания DOCX и PDF появятся после генерации.</p><div id="documentResult" class="document-result" role="status" aria-live="polite" hidden></div></div>
+      <div class="quote-dialog-actions"><button id="refreshDocumentBtn" class="button secondary" type="button">Обновить PDF</button><button id="generateDocumentBtn" class="button primary" type="button"><svg class="icon"><use href="#icon-document"/></svg>Создать документ в Битрикс24</button></div>
+    </div>
+  </dialog>
+
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>
