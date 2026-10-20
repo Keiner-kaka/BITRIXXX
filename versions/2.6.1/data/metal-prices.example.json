@@ -1,0 +1,10 @@
+{
+  "version": "demo-metal-1",
+  "currency": "RUB",
+  "prices_per_kg": {
+    "16": 120,
+    "17": 130,
+    "18": 140,
+    "19": 120
+  }
+}
