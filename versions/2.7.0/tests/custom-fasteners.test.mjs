@@ -53,12 +53,12 @@ function adapterFixture({failDocument=false}={}){
  return {adapter,calls,current:()=>current};
 }
 function snapshot(rows){const q=calculateQuote(rows,config);assert.equal(q.valid,true);return {...q,config,dealId:'55',companyName:'Заказчик',currency:'RUB',documentFields:{}};}
-test('mixed quote contains custom lines and full total in DOCX, but CRM receives catalog goods only',async()=>{
+test('document transport contains all lines without independent CRM row writes',async()=>{
  const {adapter,calls,current}=adapterFixture();const row={...custom(),coatingCode:'custom',customCoating:'Покрытие заказчика'};
  const q=snapshot([goods(),row]);assert.equal(q.total,2000);
  await adapter.createQuoteDocument(55,3,q);
- assert.equal(current().length,1);assert.equal(current()[0].productId,'11');assert.equal(current()[0].unitPrice,1500);
- assert.equal(calls.filter(c=>c.method==='GET_PRODUCT').length,1);
+ assert.equal(current().length,1);assert.equal(current()[0].productId,'99');
+ assert.equal(calls.filter(c=>c.method==='GET_PRODUCT').length,0);
  const doc=calls.find(c=>c.method==='crm.documentgenerator.document.add').params;
  assert.equal(doc.values.KpItems.length,2);assert.equal(doc.values.KpItems[1].Name,row.productName);assert.equal(doc.values.KpItems[1].Coating,row.customCoating);
  assert.equal(doc.fields.TotalSum.VALUE.replace(/\s/g,''),'2000,00');
@@ -70,13 +70,13 @@ test('custom-only quote generates document without clearing or editing existing 
 });
 test('failed custom-only generation does not claim CRM goods were changed',async()=>{
  const {adapter,current}=adapterFixture({failDocument:true});
- await assert.rejects(adapter.createQuoteDocument(55,3,snapshot([custom()])),error=>error.goodsTransferred===false);
+ await assert.rejects(adapter.createQuoteDocument(55,3,snapshot([custom()])),/Generation failed/);
  assert.equal(current()[0].productId,'99');
 });
-test('explicit CRM transfer uses goods subtotal and refuses custom-only payload without writes',async()=>{
+test('explicit CRM transport transfers full mixed and custom-only quote with confirmation fingerprint',async()=>{
  const {adapter,calls,current}=adapterFixture();const expected=fingerprintRows(current());
- const result=await adapter.applyToDeal(55,snapshot([goods(),custom()]),expected);assert.equal(result.total,1500);
- const n=calls.length;await assert.rejects(adapter.applyToDeal(55,snapshot([custom()])),/только произвольные/);assert.equal(calls.length,n);
+ const result=await adapter.applyToDeal(55,snapshot([goods(),custom()]),expected);assert.equal(result.total,2000);assert.equal(current().length,2);assert.equal(current()[1].productId,'0');
+ await adapter.applyToDeal(55,snapshot([custom()]),fingerprintRows(current()));assert.equal(current().length,1);assert.equal(current()[0].productId,'0');
 });
 test('display prices batch visible IDs without per-product get and retain missing/zero distinction',async()=>{
  const adapter=new BitrixAdapter();adapter.connected=true;

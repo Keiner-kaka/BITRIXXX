@@ -77,3 +77,13 @@
 
 .virtual-list-row .catalog-entry{justify-content:flex-start;gap:8px}
 .catalog-entry-actions{margin-top:auto}
+/* Integration settings and independent primary data. */
+.admin-workspace { max-width: 1080px; margin: 24px auto; padding: 24px; background: #fff; border-radius: 16px; }
+.admin-workspace fieldset { border: 0; padding: 0; min-width: 0; }
+.admin-workspace input:not([type=checkbox]), .admin-workspace select { max-width: 100%; }
+.mapping-row { padding: 14px 0; border-bottom: 1px solid #e5e9f2; display: grid; gap: 8px; }
+.mapping-row .hint, #textPreview p { overflow-wrap: anywhere; white-space: pre-wrap; }
+.admin-actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 24px 0; }
+.primary-fields { display: grid; grid-template-columns: minmax(140px, 1fr) 2fr; gap: 8px; width: 100%; }
+.primary-fields dt { color: #667085; }.primary-fields dd { margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .admin-workspace { padding: 14px; margin: 8px; } .primary-fields { grid-template-columns: 1fr; } }

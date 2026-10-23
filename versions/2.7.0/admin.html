@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ЮЗМ · Настройка интеграции</title>
+  <link rel="stylesheet" href="styles.css"><script src="src/sdk-loader.js"></script>
+</head>
+<body>
+<main class="admin-workspace">
+  <header><h1>Настройка интеграции ЮЗМ</h1><a href="index.html">Вернуться в конструктор</a></header>
+  <p>Настройки действуют для всех менеджеров этой установленной интеграции. Изменять их может администратор Bitrix24.</p>
+  <p id="adminStatus" role="status" aria-live="polite">Подключение к Bitrix24…</p>
+  <fieldset id="adminControls" disabled>
+    <section class="settings-section"><h2>Поля сделки</h2><p>Поля CRM не создаются и не удаляются. Для JSON выберите текстовое поле достаточной длины.</p><div id="fieldMappings"></div></section>
+    <section class="settings-section"><h2>Расчёт и ограничения</h2>
+      <p>К1 — скидка; К2 — доставка; К3 — покрытие или краска. Назначение доставки по умолчанию: К2.</p>
+      <div id="deliveryCoefficients"></div>
+      <label for="snapshotMaxBytes">Допустимый размер JSON, байт (уточните ограничение поля на портале)</label><input id="snapshotMaxBytes" type="number" min="1024" max="2000000" value="60000">
+    </section>
+    <section class="settings-section"><h2>Ресурсы Диска</h2><div class="form-grid">
+      <div class="field"><label for="textFileId">ID JSON-файла текстов КП</label><input id="textFileId" inputmode="numeric"></div>
+      <div class="field"><label for="textFolderId">ID папки текстовых шаблонов</label><input id="textFolderId" inputmode="numeric"></div>
+      <div class="field wide"><label for="diskProxyPath">Путь серверного прокси при запрете CORS</label><input id="diskProxyPath" placeholder="/api/disk-json"></div>
+      <div class="field wide"><label for="referenceFileIds">ID дополнительных справочных файлов через запятую</label><input id="referenceFileIds" placeholder="Необязательно"></div>
+    </div>
+    <button id="listTextFiles" class="button secondary" type="button">Показать JSON-файлы папки</button>
+    <select id="diskFilePicker" aria-label="JSON-файлы папки"><option value="">Выберите существующий файл</option></select>
+    </section>
+    <section class="settings-section"><h2>Тексты коммерческого предложения</h2>
+      <p>JSON задаёт формулировки. DOCX-шаблон и ранее созданные документы сохраняются.</p>
+      <div class="field"><label for="textUpload">Открыть новый JSON для проверки и публикации</label><input id="textUpload" type="file" accept=".json,application/json"></div>
+      <p id="textVersion"></p><div id="textPreview"></div>
+      <button id="reloadTextConfig" class="button secondary" type="button">Повторно загрузить конфигурацию</button>
+      <button id="publishTexts" class="button primary" type="button">Опубликовать новую версию файла</button>
+      <button id="createTextFile" class="button secondary" type="button">Загрузить как новый файл в папку</button>
+    </section>
+    <section class="settings-section"><h2>Подписи менеджеров</h2>
+      <p>Используется существующая привязка к сотруднику. Файл подписи должен быть PNG или JPEG.</p>
+      <div class="form-grid"><div class="field"><label for="signatureUser">ID сотрудника</label><input id="signatureUser" inputmode="numeric"></div><div class="field"><label for="signatureFile">ID файла подписи (пустое значение удаляет привязку)</label><input id="signatureFile" inputmode="numeric"></div></div>
+      <button id="readSignature" class="button secondary" type="button">Прочитать и проверить подпись</button>
+      <button id="saveSignature" class="button secondary" type="button">Сохранить привязку подписи</button>
+    </section>
+    <div class="admin-actions">
+      <button id="reloadConfig" class="button secondary" type="button">Перечитать настройки</button>
+      <button id="checkConfig" class="button secondary" type="button">Проверить конфигурацию</button>
+      <button id="saveConfig" class="button primary" type="button">Сохранить общие настройки</button>
+    </div>
+    <p id="configRevision" class="hint"></p>
+  </fieldset>
+</main>
+<script type="module" src="src/admin.js"></script>
+</body></html>

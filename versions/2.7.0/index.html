@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#4267e9">
-  <meta name="application-version" content="2.7.0">
+  <meta name="application-version" content="2.7.0-integration.1">
   <title>ЮЗМ · Конструктор коммерческого предложения</title>
   <link rel="stylesheet" href="styles.css">
   <script src="src/sdk-loader.js"></script>
@@ -43,6 +43,7 @@
 
       <section class="customer-section" aria-label="Данные предложения">
         <div class="field company-field"><label for="companyName">Наименование компании</label><div class="input-with-icon"><svg class="icon"><use href="#icon-building"/></svg><input id="companyName" type="text" placeholder="Название компании" autocomplete="organization"></div></div>
+        <dl id="primaryFields" class="primary-fields"></dl>
       </section>
 
       <section class="items-section" aria-label="Состав коммерческого предложения">
@@ -61,23 +62,16 @@
       <div id="status" class="status" role="status" aria-live="polite" hidden></div>
 
       <section class="template-section" aria-label="Шаблон коммерческого предложения">
+        <p id="integrationConfigStatus" class="hint" role="status"></p>
+        <p id="calculationMetrics" class="hint"></p>
         <p id="templateSummary" class="hint" role="status" aria-live="polite">Общий шаблон КП задаётся в настройках приложения.</p>
       </section>
 
       <section class="terms-section" aria-labelledby="documentFieldsTitle">
         <div class="terms-heading"><h2 id="documentFieldsTitle">Условия КП</h2><p class="hint">Выберите формулировку или отредактируйте текст. Условия сохраняются в текущем черновике КП и подставляются в документ.</p></div>
-        <div class="form-grid document-fields">
-          <div class="field payment-terms-field">
-            <label for="paymentTermsPreset">Вариант оплаты</label>
-            <select id="paymentTermsPreset"><option value="">Своя формулировка</option><option value="40_60">40% / 60%</option><option value="50_50">50% / 50%</option><option value="100">100% предоплата</option></select>
-            <label for="YuzmPaymentTerms">Условия оплаты</label>
-            <textarea id="YuzmPaymentTerms" rows="3" placeholder="Укажите условия оплаты"></textarea>
-          </div>
-          <div class="field"><label for="fastenerTermsPreset">Условия по метизам</label><select id="fastenerTermsPreset"><option value="">Свой текст</option><option value="bolts">Крепеж на базе болтов включен</option><option value="excluded">Крепеж в комплект не входит</option><option value="studs">Крепеж на базе шпилек включен</option></select><label for="YuzmFastenerTerms">Текст для КП</label><textarea id="YuzmFastenerTerms" rows="3" placeholder="Укажите условия по метизам"></textarea></div>
-          <div class="field"><div class="term-label-row"><label for="YuzmDocumentsTerms">Документы к поставке</label><button class="button quiet term-preset" type="button" data-term-preset="YuzmDocumentsTerms" aria-label="Подставить образец условий по документам к поставке">По образцу</button></div><textarea id="YuzmDocumentsTerms" rows="3" placeholder="На продукцию выдается паспорт, сертификат соответствия ТРТС."></textarea></div>
-          <div class="field"><div class="term-label-row"><label for="YuzmDeliveryTerms">Условия доставки</label><button class="button quiet term-preset" type="button" data-term-preset="YuzmDeliveryTerms" aria-label="Подставить образец условий доставки">По образцу</button></div><label class="sr-only" for="deliveryTermsPreset">Вариант условий доставки</label><select id="deliveryTermsPreset"><option value="">Свой текст</option><option value="supplier">Доставка силами поставщика</option><option value="pickup">Самовывоз со склада поставщика</option></select><textarea id="YuzmDeliveryTerms" rows="3" placeholder="Укажите адрес и условия доставки"></textarea></div>
-          <div class="field wide"><div class="term-label-row"><label for="YuzmValidityTerms">Срок действия КП</label><button class="button quiet term-preset" type="button" data-term-preset="YuzmValidityTerms" aria-label="Подставить образец срока действия КП">По образцу</button></div><textarea id="YuzmValidityTerms" rows="2" placeholder="Укажите срок действия предложения"></textarea></div>
-        </div>
+        <p id="textConfigVersion" class="hint"></p>
+        <button id="reloadTextsBtn" class="button secondary small" type="button">Перечитать тексты и настройки</button>
+        <div id="quoteTextFields" class="form-grid document-fields"></div>
         <details class="manager-details">
           <summary>Подпись менеджера <span id="managerSummary" class="hint">Можно заполнить вручную</span></summary>
           <p id="managerProfileHint" class="hint" role="status"></p>
@@ -101,9 +95,15 @@
       <section class="quote-banner" aria-label="Формирование коммерческого предложения">
         <span class="document-icon"><svg class="icon"><use href="#icon-document"/></svg></span>
         <div class="quote-banner-copy"><h2>Коммерческое предложение</h2><p id="formulaHint">(Цена каталога + метизы) × К1 × К2 × К3 × количество</p></div>
-        <div class="quote-actions"><button id="applyDealBtn" class="button secondary" type="button"><svg class="icon"><use href="#icon-arrow"/></svg>В товары сделки</button><button id="createQuoteBtn" class="button primary" type="button"><svg class="icon"><use href="#icon-document"/></svg>Предпросмотр КП</button></div>
+        <div class="quote-actions"><button id="applyDealBtn" class="button secondary" type="button"><svg class="icon"><use href="#icon-arrow"/></svg>Сохранить КП в сделку</button><button id="createQuoteBtn" class="button primary" type="button"><svg class="icon"><use href="#icon-document"/></svg>Предпросмотр КП</button></div>
       </section>
 
+      <section class="settings-section" aria-label="Сохранение расчёта">
+        <button id="restoreCalculationBtn" class="button secondary" type="button">Восстановить последний расчёт из сделки</button>
+        <button id="resumeSaveBtn" class="button secondary" type="button">Продолжить сохранение КП</button>
+        <button id="recoverDocumentBtn" class="button secondary" type="button">Проверить документ незавершённого сохранения</button>
+        <p id="saveOperationStatus" class="hint" role="status"></p>
+      </section>
       <section class="documents-section" aria-labelledby="docsTitle">
         <div class="section-header"><div><h2 id="docsTitle">История документов</h2><p>Только документы, созданные в Битрикс24 по этой сделке</p></div><button id="refreshDocumentsBtn" class="button secondary small" type="button">Обновить историю</button><button id="downloadBtn" class="button secondary small" type="button"><svg class="icon"><use href="#icon-download"/></svg>Скачать расчёт</button></div>
         <div id="docsBody" class="documents-body"><p class="empty-state">Подключите сделку, чтобы увидеть созданные документы.</p></div>
@@ -114,7 +114,7 @@
   </main>
 
   <dialog id="settingsDialog" class="dialog settings-dialog" aria-labelledby="settingsTitle">
-    <div class="dialog-header"><div><span class="eyebrow">Конструктор КП</span><h2 id="settingsTitle">Настройки</h2></div><button id="closeSettingsBtn" class="button icon-button" type="button" aria-label="Закрыть настройки"><svg class="icon"><use href="#icon-close"/></svg></button></div>
+    <div class="dialog-header"><div><span class="eyebrow">Конструктор КП</span><h2 id="settingsTitle">Настройки</h2><a href="admin.html">Административная панель</a></div><button id="closeSettingsBtn" class="button icon-button" type="button" aria-label="Закрыть настройки"><svg class="icon"><use href="#icon-close"/></svg></button></div>
     <form id="settingsForm">
       <div class="dialog-content">
         <section class="settings-section" aria-labelledby="connectionSettingsTitle">
@@ -127,7 +127,7 @@
             <button id="copyConnectionDiagnosticsBtn" class="button secondary" type="button">Скопировать диагностику</button>
           </details>
         </section>
-        <section class="settings-section"><h3>Расчёт</h3><div class="field"><label for="roundingMode">Округление до копеек</label><select id="roundingMode"><option value="line">По сумме строки</option><option value="unit">Сначала цена единицы</option></select></div><p class="hint">Цена единицы = (цена каталога + включённые метизы на одно изделие) × К1 × К2 × К3. Произвольные строки входят в итог КП и не добавляются в товары сделки.</p></section>
+        <section class="settings-section"><h3>Расчёт</h3><div class="field"><label for="roundingMode">Округление до копеек</label><select id="roundingMode"><option value="line">По сумме строки</option><option value="unit">Сначала цена единицы</option></select></div><p class="hint">Цена единицы = (цена каталога + включённые метизы на одно изделие) × К1 × К2 × К3. Произвольные строки входят в КП и товары сделки. К1 — скидка, К2 — доставка, К3 — покрытие или краска.</p></section>
         <section class="settings-section"><h3>Подключение к сделке Bitrix24</h3><div class="form-grid"><div class="field"><label for="dealIdInput">ID сделки</label><input id="dealIdInput" type="text" inputmode="numeric" placeholder="Например, 1048" autocomplete="off"></div><div class="field button-field"><button id="connectDealBtn" class="button secondary" type="button">Открыть данные сделки</button></div></div><p class="hint">Вкладка установленного приложения получает ID сделки автоматически. Для запросов REST используются права приложения.</p><button id="registerPlacementBtn" class="button secondary" type="button">Зарегистрировать вкладку в сделке</button></section>
         <section class="settings-section" aria-labelledby="documentSettingsTitle">
           <h3 id="documentSettingsTitle">Документы КП в Битрикс24</h3>
@@ -167,7 +167,7 @@
     <div id="quotePreview" class="quote-preview"></div>
     <div class="dialog-footer">
       <div class="quote-result"><p class="hint">Создайте документ в Битрикс24. Ссылки для скачивания DOCX и PDF появятся после генерации.</p><div id="documentResult" class="document-result" role="status" aria-live="polite" hidden></div></div>
-      <div class="quote-dialog-actions"><button id="refreshDocumentBtn" class="button secondary" type="button">Обновить PDF</button><button id="generateDocumentBtn" class="button primary" type="button"><svg class="icon"><use href="#icon-document"/></svg>Создать документ в Битрикс24</button></div>
+      <div class="quote-dialog-actions"><button id="refreshDocumentBtn" class="button secondary" type="button">Обновить PDF</button><button id="generateDocumentBtn" class="button primary" type="button"><svg class="icon"><use href="#icon-document"/></svg>Сформировать и сохранить КП</button></div>
     </div>
   </dialog>
 

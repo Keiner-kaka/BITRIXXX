@@ -3,9 +3,11 @@ import { parseNumber, formatCoating, formatExecutionTerm, isCustomRow } from './
 import { filterCatalogEntries, catalogNavigation, navigationFields, NAVIGATION_IBLOCK_ID, isInactiveCatalogEntry, hasCatalogProperty } from './catalog.js';
 import {SUPPORT_SECTION_IDS, catalogSectionId} from './fasteners.js';
 import {signatureReference} from './manager.js';
+import {displayValue} from './integration-config.js';
 
 const ALLOWED_METHODS = new Set([
-  'app.info', 'app.option.get', 'app.option.set', 'user.get',
+  'app.info', 'app.option.get', 'app.option.set', 'user.get', 'methods',
+  'crm.deal.fields', 'crm.deal.userfield.list', 'crm.deal.update',
   'crm.deal.get', 'crm.deal.productrows.get', 'crm.deal.productrows.set',
   'crm.item.productrow.set', 'crm.company.get', 'crm.contact.get',
   'crm.catalog.list', 'crm.product.list', 'crm.product.get',
@@ -15,7 +17,7 @@ const ALLOWED_METHODS = new Set([
   'catalog.priceType.list', 'catalog.price.list',
   'crm.documentgenerator.template.list', 'crm.documentgenerator.template.get',
   'crm.documentgenerator.document.add', 'crm.documentgenerator.document.get', 'crm.documentgenerator.document.list',
-  'disk.file.get',
+  'disk.file.get', 'disk.folder.get', 'disk.folder.getchildren', 'disk.folder.uploadfile', 'disk.file.uploadVersion',
   'placement.bind', 'placement.get',
 ]);
 const QUOTE_TEMPLATE_OPTION = 'yuzmQuoteTemplateId';
@@ -815,7 +817,9 @@ export class BitrixAdapter {
     const dealId = id(value, 'ID сделки');
     const deal = await this.call('crm.deal.get', {id: Number(dealId)});
     if (String(deal?.ID) !== dealId) throw new Error('Bitrix24 не подтвердил выбранную сделку.');
-    const userId = id(deal.ASSIGNED_BY_ID, 'ID ответственного за сделку');
+    const owner = deal[this.managerFieldCode || 'ASSIGNED_BY_ID'];
+    if (Array.isArray(owner) && owner.length !== 1) throw new Error('Для подписи выберите одного ответственного менеджера.');
+    const userId = id(Array.isArray(owner) ? owner[0] : owner, 'ID ответственного за сделку');
     const users = await this.call('user.get', {
       FILTER: {ID: Number(userId)}, select: ['ID', 'NAME', 'SECOND_NAME', 'LAST_NAME', 'WORK_POSITION', 'WORK_PHONE', 'EMAIL'],
     });
@@ -920,7 +924,7 @@ export class BitrixAdapter {
     };
   }
 
-  async createQuoteDocument(dealValue, templateValue, snapshot) {
+  async prepareQuoteDocument(dealValue, templateValue, snapshot) {
     const dealId = id(dealValue, 'ID сделки');
     const templateId = id(templateValue, 'ID шаблона');
     if (!snapshot || String(snapshot.dealId) !== dealId) throw new Error('Расчёт КП относится к другой сделке.');
@@ -966,7 +970,10 @@ export class BitrixAdapter {
     for (const [placeholder, chain] of Object.entries(DOCUMENT_ITEM_FIELDS)) fields[placeholder] = { VALUE: chain };
     fields.RequisiteRqCompanyName = { VALUE: companyName };
     fields.TotalSum = { VALUE: DOCUMENT_MONEY.format(total) };
-    for (const placeholder of DOCUMENT_FIELDS) {
+    const primaryFields = {createdAt: 'YuzmOrderCreatedAt', payment: 'YuzmPaymentType', deliveryType: 'YuzmDeliveryType', deliveryAddress: 'YuzmDeliveryAddress', deliveryDate: 'YuzmDeliveryDate'};
+    for (const [key, placeholder] of Object.entries(primaryFields)) fields[placeholder] = {VALUE: documentText(displayValue(snapshot.primary?.[key]), placeholder)};
+    fields.YuzmClient = {VALUE: companyName};
+    for (const placeholder of new Set([...DOCUMENT_FIELDS, ...Object.keys(snapshot.documentFields || {}).filter(key => /^Yuzm[A-Za-z0-9]{1,60}Terms$/.test(key))])) {
       fields[placeholder] = { VALUE: documentText(snapshot.documentFields?.[placeholder], placeholder) };
     }
     // The supplied DOCX places position and name directly next to each other.
@@ -979,7 +986,7 @@ export class BitrixAdapter {
     if (snapshot.managerSignatureReference && !snapshot.managerUserId) throw new Error('Подпись не привязана к ответственному. Подставьте данные ответственного и заново откройте предпросмотр КП.');
     if (snapshot.managerUserId) {
       const current = await this.call('crm.deal.get', {id: Number(dealId)});
-      if (String(current?.ID) !== dealId || String(current.ASSIGNED_BY_ID) !== id(snapshot.managerUserId, 'ID менеджера расчёта')) {
+      if (String(current?.ID) !== dealId || String(current[this.managerFieldCode || 'ASSIGNED_BY_ID']) !== id(snapshot.managerUserId, 'ID менеджера расчёта')) {
         throw new Error('Ответственный за сделку изменился. Подставьте его данные и заново откройте предпросмотр КП перед созданием документа.');
       }
       signatureUrl = await this.resolveManagerSignature(snapshot.managerSignatureReference);
@@ -988,34 +995,26 @@ export class BitrixAdapter {
     const response = await this.call('crm.documentgenerator.template.get', { id: Number(templateId) });
     const template = documentTemplate(response?.template, deal.categoryId);
     if (template.id !== templateId || !template.available) throw new Error('Выбранный шаблон удалён, неактивен или недоступен для направления этой сделки.');
-    // Validate the complete document and template before changing CRM. The
-    // document and the mandatory replacement use the very same saved version.
-    let goodsTransferred = false;
-    if (snapshot.rows.some(row => !isCustomRow(row))) {
-      const before = await this.loadDeal(dealId);
-      await this.applyToDeal(dealId, snapshot, fingerprintRows(before.rows));
-      goodsTransferred = true;
-    }
-    let created;
+    const title = snapshot.operationId ? `КП ЮЗМ [${snapshot.operationId}]` : 'КП ЮЗМ';
+    fields.DocumentTitle = {VALUE: title};
+    return {templateId: Number(templateId), entityTypeId: 2, entityId: Number(dealId),
+      values: {KpItems: items, YuzmManagerSignature: signatureUrl, DocumentTitle: title}, fields, stampsEnabled: 1};
+  }
+
+  async createPreparedQuoteDocument(prepared) {
+    const created = await this.call('crm.documentgenerator.document.add', prepared);
     try {
-      created = await this.call('crm.documentgenerator.document.add', {
-        templateId: Number(templateId), entityTypeId: 2, entityId: Number(dealId),
-        values: { KpItems: items, YuzmManagerSignature: signatureUrl }, fields, stampsEnabled: 1,
-      });
+      return this._document(created?.document, {templateId: String(prepared.templateId), entityId: String(prepared.entityId), entityTypeId: '2'});
     } catch (error) {
-      error.goodsTransferred = goodsTransferred;
+      if (/^[1-9]\d*$/.test(String(created?.document?.id))) error.documentId = String(created.document.id);
+      error.code = 'DOCUMENT_RESPONSE_UNVERIFIED';
       throw error;
     }
-    try {
-      return this._document(created?.document, { templateId, entityId: dealId, entityTypeId: '2' });
-    } catch (error) {
-      let documentId;
-      try { documentId = id(created?.document?.id, 'ID документа'); } catch { error.goodsTransferred = goodsTransferred; throw error; }
-      const unverified = new Error(`Bitrix24 вернул документ #${documentId}, но его данные или ссылки не подтверждены. Проверьте документ перед повторным созданием.`);
-      unverified.code = 'DOCUMENT_RESPONSE_UNVERIFIED';
-      unverified.documentId = documentId;
-      throw unverified;
-    }
+  }
+
+  // Transport primitive. The UI uses QuoteSaver for the complete managed save.
+  async createQuoteDocument(dealValue, templateValue, snapshot) {
+    return this.createPreparedQuoteDocument(await this.prepareQuoteDocument(dealValue, templateValue, snapshot));
   }
 
   async listQuoteDocuments(value) {
@@ -1032,9 +1031,11 @@ export class BitrixAdapter {
     return [...result.values()].sort((a, b) => Number(b.id) - Number(a.id));
   }
 
-  async getQuoteDocument(value, {dealId} = {}) {
+  async getQuoteDocument(value, {dealId, templateId} = {}) {
     const documentId = id(value, 'ID документа');
     const response = await this.call('crm.documentgenerator.document.get', {id: Number(documentId)});
+    if (dealId && (String(response?.document?.entityId) !== String(dealId) || String(response?.document?.entityTypeId) !== '2')) throw new Error('Не подтверждена принадлежность документа выбранной сделке (документ другого шаблона или сделки).');
+    if (templateId && String(response?.document?.templateId) !== String(templateId)) throw new Error('Документ относится к другому шаблону.');
     return this._document(response?.document, {id: documentId,
       ...(dealId ? {entityId: id(dealId, 'ID сделки'), entityTypeId: '2'} : {})});
   }
@@ -1058,15 +1059,14 @@ export class BitrixAdapter {
     });
   }
 
-  async applyToDeal(dealValue, snapshot, expectedFingerprint) {
+  async applyToDeal(dealValue, snapshot, expectedFingerprint, {dryRun = false} = {}) {
     const dealId = id(dealValue, 'ID сделки');
     if (String(snapshot.dealId) !== dealId) throw new Error('Расчёт относится к другой сделке.');
     if (!Array.isArray(snapshot.rows) || !snapshot.rows.length || snapshot.valid === false) throw new Error('Нет корректных позиций для применения.');
     const quoteCurrency = currency(snapshot.currency ?? snapshot.config?.currency);
-    const catalogRows = snapshot.rows.filter(row => !isCustomRow(row));
-    if (!catalogRows.length) throw new Error('В расчёте только произвольные строки. Товары сделки не изменены.');
-    const requested = catalogRows.map((row, index) => {
-      const productId = id(row.productId, 'ID товара');
+    const requested = snapshot.rows.map((row, index) => {
+      const productId = isCustomRow(row) ? '0' : id(row.productId, 'ID товара');
+      if (!String(row.productName || '').trim()) throw new Error('Заполните наименование товарной строки.');
       const price = number(row.unitPrice, 'Цена единицы');
       const quantity = parseNumber(row.quantity);
       if (!Number.isFinite(quantity)) throw new Error('Количество: требуется конечное число.');
@@ -1080,13 +1080,11 @@ export class BitrixAdapter {
         discountTypeId: 2, discountRate: 0, discountSum: 0, taxRate, taxIncluded, sort: (index + 1) * 10 };
     });
     const unitTotal = Math.round(requested.reduce((sum, row) => sum + Math.round(row.price * row.quantity * 100) / 100, 0) * 100) / 100;
-    const catalogTotal = catalogRows.length === snapshot.rows.length ? snapshot.total
-      : catalogRows.reduce((sum, row) => sum + Math.round(number(row.lineTotal, 'Сумма товарной строки') * 100), 0) / 100;
-    if (catalogTotal !== undefined && Math.abs(number(catalogTotal, 'Итого товаров') - unitTotal) > 0.010001) {
+    if (snapshot.total !== undefined && Math.round(number(snapshot.total, 'Итого товаров') * 100) !== Math.round(unitTotal * 100)) {
       throw new Error('Итого КП отличается от суммы цен единиц × количество. Для переноса в сделку выберите округление цены единицы.');
     }
     // Verify IDs against the actual catalog; do not rely on demo IDs or a UI flag.
-    for (const productId of new Set(requested.map(row => String(row.productId)))) {
+    for (const productId of new Set(requested.filter(row => row.productId > 0).map(row => String(row.productId)))) {
       const product = await this.getProduct(productId, {currency: quoteCurrency});
       if (!product.verified || product.currency !== quoteCurrency) throw new Error(`Товар #${productId}: не подтверждены ID или валюта каталога.`);
     }
@@ -1094,23 +1092,27 @@ export class BitrixAdapter {
     // REST has no conditional/transactional comparison API, so a final server-side race remains possible.
     const current = await this.loadDeal(dealId);
     if (current.currency !== quoteCurrency) throw new Error('Валюта сделки отличается от валюты КП. Автоконвертация не выполняется.');
-    if (expectedFingerprint === undefined && current.rows.length) throw new Error('Перед заменой существующих товаров нужен предварительный просмотр и подтверждение состава сделки.');
+    if (!dryRun && expectedFingerprint === undefined && current.rows.length) throw new Error('Перед заменой существующих товаров нужен предварительный просмотр и подтверждение состава сделки.');
     if (expectedFingerprint !== undefined && expectedFingerprint !== fingerprintRows(current.rows)) {
       throw new Error('Товары сделки изменились после предварительного просмотра. Обновите данные и подтвердите замену ещё раз.');
     }
+    if (dryRun) return {requested, before: current, total: unitTotal};
     let method = 'crm.item.productrow.set';
-    try { await this.call(method, { ownerType: 'D', ownerId: Number(dealId), productRows: requested }); }
+    let writeResponse;
+    try { writeResponse = await this.call(method, { ownerType: 'D', ownerId: Number(dealId), productRows: requested }); }
     catch (error) {
       if (!unavailable(error)) throw error;
       method = 'crm.deal.productrows.set';
       const rows = requested.map(row => ({ PRODUCT_ID: row.productId, PRODUCT_NAME: row.productName,
         PRICE: row.price, QUANTITY: row.quantity, DISCOUNT_TYPE_ID: 2, DISCOUNT_RATE: 0, DISCOUNT_SUM: 0,
         TAX_RATE: row.taxRate, TAX_INCLUDED: row.taxIncluded, SORT: row.sort }));
-      await this.call(method, { id: Number(dealId), rows });
+      writeResponse = await this.call(method, { id: Number(dealId), rows });
     }
+    if (writeResponse === false || writeResponse === null || writeResponse === undefined) throw new Error('CRM не подтвердила запись товарных строк.');
     const saved = await this.loadDeal(dealId);
     const verified = saved.currency === quoteCurrency && saved.rows.length === requested.length
       && saved.rows.every((row, index) => row.productId === String(requested[index].productId)
+        && row.productName === requested[index].productName
         && Math.abs(row.unitPrice - requested[index].price) < 0.000001
         && Math.abs(row.quantity - requested[index].quantity) < 0.000001
         && Math.abs(row.taxRate - requested[index].taxRate) < 0.000001

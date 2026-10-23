@@ -1,5 +1,5 @@
 import {calculateQuote, formatMoney, validateConfig as normalizeConfig, withCoatingOptions, coatingSupportsRal, formatCoating, parseNumber, formatExecutionTerm, isCustomRow} from './calculator.js';
-import {BitrixAdapter, fingerprintRows} from './bitrix.js';
+import {BitrixAdapter} from './bitrix.js';
 import {CatalogSearchIndex, navigationLabels} from './catalog.js';
 import {VirtualList} from './virtual-list.js';
 import {normalizeStoredDraft} from './draft-store.js';
@@ -7,12 +7,22 @@ import {signatureSourceText, managerValues} from './manager.js';
 import {products as demoProducts, initialRows, newRow, newCustomRow} from './demo.js';
 
 import {assignFasteners} from './fasteners.js';
+import {IntegrationSettings, PARAMETERS, displayValue, validateMappings} from './integration-config.js';
+import {loadPrimaryData} from './deal-primary.js';
+import {DiskTexts, validateTextTemplates, appliedTexts} from './text-templates.js';
+import {QuoteSaver} from './quote-save.js';
+import {verifySnapshot, calculateMetrics} from './quote-snapshot.js';
 
 const $ = id => document.getElementById(id);
 const clone = value => structuredClone(value);
 const uid = () => crypto.randomUUID();
 const validateConfig = raw => withCoatingOptions(normalizeConfig(raw));
 const adapter = new BitrixAdapter();
+const integrationSettings = new IntegrationSettings(adapter);
+const diskTexts = new DiskTexts(adapter);
+let integrationConfig, dealFields, textConfig, primaryData = null, integrationReady = false;
+let integrationMessage = '';
+const saver = new QuoteSaver(adapter, integrationSettings, {scope: window.location.host, notify: message => status(message)});
 const STORE = 'yuzm-kp-prototype-v1';
 let builtinConfig, config, calculation, state, connected = false, busy = false, chosenRow = null;
 let connecting = false, connectionCode = 'NOT_STARTED';
@@ -21,40 +31,29 @@ let catalogPriceState = {values: new Map(), pending: new Set(), inFlight: new Se
 let templates = [], templatesLoaded = false;
 let sharedTemplate = {id: '', loaded: false, loading: false, error: ''};
 let managerProfile = null, managerLoading = false, managerRequest = 0, managerMessage = '';
-let previewFingerprint = null;
 let catalogIndex = null, catalogLoad = null, catalogGeneration = 0, catalogRequest = 0, catalogFilterTimer;
 let catalogList;
 let generatedDocuments = [], documentsLoading = false, documentsError = '', documentsRequest = 0;
 let previewData = null, previewCreatedDocument = null;
-const documentFieldNames = ['YuzmPaymentTerms', 'YuzmFastenerTerms', 'YuzmDocumentsTerms', 'YuzmDeliveryTerms', 'YuzmValidityTerms', 'YuzmManagerPosition', 'YuzmManagerName', 'YuzmManagerPhone', 'YuzmManagerEmail'];
 const managerFields = ['YuzmManagerPosition', 'YuzmManagerName', 'YuzmManagerPhone', 'YuzmManagerEmail'];
-const paymentPresets = {
-  '40_60': '40% предоплата + 60% по факту готовности к отгрузке.',
-  '50_50': '50% предоплата + 50% по факту готовности к отгрузке.',
-  '100': '100% предоплата.'
-};
-const fastenerPresets = {
-  bolts: 'В стоимость включен крепеж на базе болтов (гальваническое покрытие).',
-  excluded: 'Крепеж в комплект не входит.',
-  studs: 'В стоимость включен крепеж на базе шпилек (гальваническое покрытие).'
-};
-const deliveryPresets = {
-  supplier: 'Доставка в г. Краснодар, Ставропольская, 19 производится силами поставщика.',
-  pickup: 'Самовывоз со склада поставщика по адресу : пос. Дорожный, индустриальный парк Краснодар. 45.123173, 39.368309.'
-};
-const defaultDocumentFields = {
-  YuzmPaymentTerms: paymentPresets['50_50'],
-  YuzmFastenerTerms: fastenerPresets.bolts,
-  YuzmDocumentsTerms: 'На продукцию выдается паспорт, сертификат соответствия ТРТС.',
-  YuzmDeliveryTerms: deliveryPresets.supplier,
-  YuzmValidityTerms: 'КП действительно в течение трех рабочих дней.',
-  YuzmManagerPosition: '', YuzmManagerName: '', YuzmManagerPhone: '', YuzmManagerEmail: ''
-};
-function migrateDocumentFields(fields) {
-  if (fields.YuzmDocumentsTerms === 'На продукцию выдается паспорт, сертификат соответствия.') {
-    return {...fields, YuzmDocumentsTerms: defaultDocumentFields.YuzmDocumentsTerms};
-  }
-  return fields;
+let defaultDocumentFields = {YuzmManagerPosition: '', YuzmManagerName: '', YuzmManagerPhone: '', YuzmManagerEmail: ''};
+function migrateDocumentFields(fields) { return fields; }
+function useTextConfig(value) {
+  textConfig = value;
+  defaultDocumentFields = {...Object.fromEntries(Object.values(value.templates).map(category => [category.field,
+    category.presets.find(preset => preset.id === category.defaultPresetId).text])),
+    YuzmManagerPosition: '', YuzmManagerName: '', YuzmManagerPhone: '', YuzmManagerEmail: ''};
+}
+async function reloadIntegration() {
+  integrationReady = false;
+  integrationMessage = 'Проверка настроек интеграции…';
+  const [settings, fields] = await Promise.all([integrationSettings.load(), integrationSettings.fields()]);
+  integrationConfig = settings; dealFields = fields;
+  validateMappings(settings, fields);
+  const texts = await diskTexts.read(settings.resources.textFileId, settings.resources.diskProxyPath);
+  useTextConfig(texts); adapter.managerFieldCode = settings.fields.manager.code;
+  integrationReady = true;
+  integrationMessage = 'Настройки интеграции и тексты КП загружены.';
 }
 const defaultSettings = {dealId: '', rounding: 'line'};
 const draft = () => state.draft;
@@ -139,12 +138,32 @@ function formulaText() {
 function renderCustomer() { $('companyName').value = draft().companyName || ''; }
 function renderTerms() {
   draft().documentFields ||= clone(defaultDocumentFields);
-  for (const key of documentFieldNames) $(key).value = draft().documentFields[key] || '';
-  $('paymentTermsPreset').value = Object.keys(paymentPresets).find(key => paymentPresets[key] === draft().documentFields.YuzmPaymentTerms) || '';
-  $('fastenerTermsPreset').value = Object.keys(fastenerPresets).find(key => fastenerPresets[key] === draft().documentFields.YuzmFastenerTerms) || '';
-  $('deliveryTermsPreset').value = Object.keys(deliveryPresets).find(key => deliveryPresets[key] === draft().documentFields.YuzmDeliveryTerms) || '';
+  const nodes = Object.entries(textConfig.templates).map(([key, category]) => {
+    const field = category.field, value = draft().documentFields[field] ?? '';
+    const picker = select([...(category.allowCustom ? [{value: '', text: 'Свой текст'}] : [{value: '', text: 'Выберите вариант'}]),
+      ...category.presets.map(preset => ({value: preset.id, text: preset.label}))],
+      category.presets.find(preset => preset.text === value)?.id || '', {'aria-label': category.label});
+    const textarea = element('textarea', {id: field, rows: '3', 'aria-label': category.label, value});
+    textarea.readOnly = !category.allowCustom;
+    picker.addEventListener('change', () => {
+      const preset = category.presets.find(item => item.id === picker.value);
+      if (preset) { draft().documentFields[field] = preset.text; textarea.value = preset.text; remember(); }
+    });
+    textarea.addEventListener('input', () => {
+      draft().documentFields[field] = textarea.value;
+      picker.value = category.presets.find(item => item.text === textarea.value)?.id || ''; remember();
+    });
+    return element('div', {class: 'field'}, [element('label', {for: field, text: category.label}), picker, textarea]);
+  });
+  $('quoteTextFields').replaceChildren(...nodes);
+  for (const key of managerFields) $(key).value = draft().documentFields[key] || '';
+  $('textConfigVersion').textContent = 'Редакция текстов: ' + textConfig.version;
   $('managerSignatureSource').value = signatureSourceText(draft().managerSignatureReference);
   renderManagerControls();
+}
+function renderPrimary() {
+  $('primaryFields').replaceChildren(...Object.entries(primaryData?.values || {}).flatMap(([key, value]) => [
+    element('dt', {text: PARAMETERS[key].label}), element('dd', {text: displayValue(value) || '—'})]));
 }
 
 function ensureManagerOverrides(target) {
@@ -291,6 +310,7 @@ function assignProduct(row, product) {
     currency: product.currency, source: product.source || 'catalog', priceSource: product.source === 'deal' ? 'deal' : 'catalog',
     priceMissing: Boolean(product.priceMissing), priceNote: product.priceNote || '',
     rowType: 'catalog', needsCatalogPrice: false});
+  row.unitWeight = Number.isFinite(product.navigation?.weight) ? String(product.navigation.weight) : '';
   assignFasteners(row, product);
   delete row.isVariation; delete row.parentProductId; delete row.parentProductName;
   if (product.isVariation) Object.assign(row, {isVariation: true, parentProductId: product.parentProductId || '', parentProductName: product.parentProductName || ''});
@@ -334,18 +354,20 @@ function renderRows() {
       if (row.fastenersNote && row.fastenersEnabled === true) hardware.push(element('small', {class: 'hint', text: row.fastenersNote}));
     }
     return element('div', {class: 'item-row' + (custom ? ' custom-item-row' : ''), 'data-row-id': row.id}, [
-      cell('item-name', [nameControl, ...(custom ? [element('small', {class: 'hint', text: 'Произвольная строка · только в КП'})] : []), priceLine(row),
+      cell('item-name', [nameControl, ...(custom ? [element('small', {class: 'hint', text: 'Произвольная строка · КП и сделка'})] : []), priceLine(row),
         element('p', {class: 'price-note', 'data-price-note': row.id, role: 'status', text: row.priceMissing ? row.priceNote : ''}), ...hardware]),
       cell('item-coating', [
         select(config.coatings.map(c => ({value: c.code, text: c.name})), row.coatingCode, {'data-field': 'coatingCode', 'aria-label': 'Покрытие позиции'}),
         ...(row.coatingCode === 'custom' ? [element('label', {class: 'mini-label', text: 'Свой вариант покрытия'}, [input(row.customCoating || '', 'customCoating', 'Нестандартное покрытие', {placeholder: 'Введите покрытие', maxlength: '250', required: 'required'})])] : []),
         ...(coatingSupportsRal(config.coatings.find(c => c.code === row.coatingCode)) ? [element('label', {class: 'mini-label ral-field', text: 'Номер RAL'}, [input(row.ralColor || '', 'ralColor', 'Номер цвета RAL', {placeholder: '9005', maxlength: '100'})])] : [])
       ]),
-      cell('item-quantity', [input(row.quantity, 'quantity', 'Количество позиции', {inputmode: 'decimal'})]),
+      cell('item-quantity', [input(row.quantity, 'quantity', 'Количество позиции', {inputmode: 'decimal'}),
+        element('label', {class: 'mini-label', text: 'Масса единицы, кг'}, [input(row.unitWeight ?? '', 'unitWeight', 'Масса единицы, кг', {inputmode: 'decimal', placeholder: 'Включая явный 0'})]),
+        ...(custom ? [element('label', {class: 'mini-label'}, [element('input', {type: 'checkbox', 'data-field': 'separateDelivery', checked: row.deliveryRole === 'separate'}), element('span', {text: 'Отдельная доставка'})])] : [])]),
       cell('item-coefficients', [element('div', {class: 'coef-grid coeffs-three'}, [
-        element('label', {class: 'mini-label', text: 'КП-1'}, [input(row.k1, 'k1', 'Коэффициент КП-1', {inputmode: 'decimal'})]), element('span', {class: 'coef-times', text: '×'}),
-        element('label', {class: 'mini-label', text: 'КП-2'}, [input(row.k2, 'k2', 'Коэффициент КП-2', {inputmode: 'decimal'})]),
-        element('label', {class: 'mini-label', text: 'К3 · покраска'}, [input(row.k3, 'k3', 'Коэффициент покраски и покрытия', {inputmode: 'decimal'})])])]),
+        element('label', {class: 'mini-label', text: 'К1 · скидка'}, [input(row.k1, 'k1', 'К1 — скидка', {inputmode: 'decimal'})]), element('span', {class: 'coef-times', text: '×'}),
+        element('label', {class: 'mini-label', text: 'К2 · доставка'}, [input(row.k2, 'k2', 'К2 — доставка', {inputmode: 'decimal'})]),
+        element('label', {class: 'mini-label', text: 'К3 · покрытие / краска'}, [input(row.k3, 'k3', 'К3 — покрытие или краска', {inputmode: 'decimal'})])])]),
       cell('item-execution', [input(row.executionTerm ?? '', 'executionTerm', 'Срок исполнения: число рабочих дней или текст', {placeholder: '15 или Отгрузка с СГП', maxlength: '250', list: 'executionTermOptions'}), element('small', {class: 'execution-preview', 'data-execution-preview': row.id})]),
       cell('item-remove', [element('button', {type: 'button', class: 'icon-button', 'data-action': 'remove', text: '×', 'aria-label': 'Удалить позицию'})]),
       element('div', {class: 'item-summary', 'data-summary': row.id})
@@ -357,6 +379,11 @@ function recalc() {
   calculation = calculateQuote(draft().rows, config);
   $('grandTotal').textContent = calculation.valid ? formatMoney(calculation.total, config.currency) : 'Проверьте позиции';
   $('quantityTotal').textContent = String(calculation.quantity || 0) + ' ед.';
+  $('integrationConfigStatus').textContent = connected ? integrationMessage : '';
+  try {
+    const metrics = calculateMetrics({...calculation, config}, integrationConfig?.deliveryCoefficientKeys || ['k2']);
+    $('calculationMetrics').textContent = `Масса изделий: ${metrics.weight} кг · Доставка в составе КП: ${formatMoney(metrics.delivery, config.currency)}`;
+  } catch { $('calculationMetrics').textContent = 'Для сохранения КП укажите массу каждой позиции, включая явный 0 для работ. Отдельная доставка включается в итог отдельной строкой.'; }
   $('formulaHint').textContent = formulaText();
   for (const row of calculation.rows) {
     const summary = [...document.querySelectorAll('[data-summary]')].find(n => n.dataset.summary === row.id);
@@ -378,8 +405,12 @@ function recalc() {
 
   }
   $('createQuoteBtn').disabled = busy || managerLoading || !calculation.valid;
-  $('applyDealBtn').disabled = !connected || !calculation.valid || busy || managerLoading || !draft().rows.some(row => !isCustomRow(row));
+  $('applyDealBtn').disabled = !connected || !calculation.valid || busy || managerLoading;
   $('downloadBtn').disabled = busy || managerLoading;
+  $('restoreCalculationBtn').disabled = busy || !connected || !state.activeDealId || !integrationReady;
+  $('resumeSaveBtn').disabled = busy || !connected || !integrationReady;
+  $('recoverDocumentBtn').disabled = busy || !connected;
+  try { const pending = state.activeDealId && saver.pending(state.activeDealId); $('saveOperationStatus').textContent = pending && pending.stage !== 'done' ? 'Есть незавершённое сохранение: ' + pending.stage + '. ' + (pending.document ? 'Документ #' + pending.document.id : 'Проверьте историю документов.') : ''; } catch (error) { $('saveOperationStatus').textContent = safeError(error); }
   for (const button of document.querySelectorAll('[data-choose-product]')) {
     button.disabled = busy;
   }
@@ -490,7 +521,7 @@ function documentLinks(record) {
 }
 function renderDocumentControls() {
   const snapshot = previewSnapshot(), record = previewDocument(snapshot);
-  const canCreate = connected && sharedTemplate.loaded && state.scope !== 'demo' && snapshot && String(snapshot.dealId) === String(state.activeDealId) && selectedTemplateId();
+  const canCreate = integrationReady && connected && sharedTemplate.loaded && state.scope !== 'demo' && snapshot && String(snapshot.dealId) === String(state.activeDealId) && selectedTemplateId();
   $('generateDocumentBtn').disabled = busy || sharedTemplate.loading || !sharedTemplate.loaded || !canCreate || Boolean(record);
   $('refreshDocumentBtn').disabled = busy || !record || !connected;
   $('documentResult').hidden = !snapshot;
@@ -498,7 +529,7 @@ function renderDocumentControls() {
   if (record) {
     $('documentResult').append(element('p', {text: 'Документ #' + record.id + (record.conversionError ? ' создан, но Битрикс24 сообщил об ошибке преобразования PDF.' : record.pdfUrl ? ' готов.' : ' создан. PDF ещё формируется — обновите его готовность.')}), ...documentLinks(record));
   } else if (snapshot) {
-    $('documentResult').textContent = canCreate ? 'Каталоговые позиции расчёта заменят товары сделки; произвольные строки попадут только в КП. Если в КП только произвольные строки, товары сделки не изменятся. Документ создаётся по общему шаблону #' + selectedTemplateId() + '.'
+    $('documentResult').textContent = canCreate ? 'После подтверждения полный состав КП, включая произвольные позиции, заменит товары сделки. Будут сохранены результаты и JSON расчёта. Шаблон документа #' + selectedTemplateId() + '.'
       : 'Для генерации документа подключите сделку. Общий шаблон выбирается администратором в настройках.';
   }
 }
@@ -512,19 +543,15 @@ async function generateDocument() {
     const templateId = selectedTemplateId();
     if (!templateId) throw new Error('Администратор должен выбрать общий шаблон КП в настройках.');
     if (previewDocument()) return;
-    status('Переношу товары расчёта в сделку и создаю документ КП…');
-    const result = await adapter.createQuoteDocument(state.activeDealId, templateId, payload);
-    previewCreatedDocument = {...result, templateId, createdAt: result.createdAt || new Date().toISOString()};
-    await refreshDocuments();
-    upsertDocument(previewCreatedDocument);
-    status('Документ #' + result.id + ' создан в Битрикс24.' + (result.pdfUrl ? ' PDF готов.' : ' PDF можно получить после преобразования документа.'), 'success');
-  } catch (error) {
-    if (error.documentId) {
-      await refreshDocuments();
-      previewCreatedDocument = generatedDocuments.find(doc => doc.id === String(error.documentId)) || null;
-      status('Документ #' + error.documentId + ' создан, но его данные не подтверждены. Проверьте историю документов перед повторной генерацией.', 'error');
-    } else status((error.goodsTransferred ? 'Товары перенесены в сделку. Создание документа не подтверждено. ' : '') + safeError(error), 'error');
-  } finally {busy = false; recalc(); renderDocuments();}
+    if (!integrationReady) throw new Error('Завершите настройку интеграции в административной панели.');
+    status('Проверяю данные перед сохранением КП…');
+    const result = await saver.save(payload, integrationConfig, dealFields);
+    if (!result) return;
+    previewCreatedDocument = result.document;
+    await refreshDocuments(); upsertDocument(result.document);
+    status('КП сохранено: документ #' + result.document.id + ', полный состав товаров, суммы и JSON проверены. Это последнее сформированное КП; согласование клиентом не установлено.', 'success');
+  } catch (error) { status(safeError(error), 'error'); }
+  finally {busy = false; recalc(); renderDocuments();}
 }
 async function refreshDocument(value = previewDocument()?.id) {
   if (busy || !value) return;
@@ -541,7 +568,7 @@ function render() {
   $('dealBadge').textContent = state.scope === 'demo' ? 'ПИЛОТ' : 'Сделка #' + state.activeDealId;
   $('connectionBadge').textContent = connected ? 'Bitrix24 подключён' : 'Демонстрационный режим';
   $('connectionBadge').classList.toggle('connected', connected);
-  renderCustomer(); renderRows(); renderDocuments(); renderTemplates(); renderTerms();
+  renderCustomer(); renderPrimary(); renderRows(); renderDocuments(); renderTemplates(); renderTerms();
 }
 function ensureValid() {
   calculation = calculateQuote(draft().rows, config);
@@ -553,7 +580,8 @@ function ensureValid() {
 function buildQuoteData() {
   ensureValid();
   return {schemaVersion: 3, quoteId: uid(), dealId: state.scope === 'demo' ? null : String(state.activeDealId), createdAt: new Date().toISOString(),
-    companyName: draft().companyName, currency: config.currency,
+    companyName: draft().companyName, currency: config.currency, primary: clone(primaryData?.values || {}),
+    deliveryCoefficientKeys: integrationConfig?.deliveryCoefficientKeys || ['k2'], appliedTexts: appliedTexts(draft().documentFields, textConfig),
     rows: withoutRetiredFields(clone(calculation.rows)), total: calculation.total, quantity: calculation.quantity,
     config: clone(config),
     documentTemplateId: selectedTemplateId(), documentFields: clone(draft().documentFields || {}),
@@ -599,7 +627,7 @@ function showQuote(snapshot) {
     table,
     element('p', {class: 'quote-total', text: 'Итого: ' + formatMoney(snapshot.total, snapshot.currency)})
   );
-  for (const key of documentFieldNames.filter(key => !managerFields.includes(key))) {
+  for (const key of Object.keys(snapshot.documentFields || {}).filter(key => !managerFields.includes(key))) {
     if (snapshot.documentFields?.[key]) $('quotePreview').append(element('p', {text: (key === 'YuzmPaymentTerms' ? 'Условия оплаты: ' : '') + snapshot.documentFields[key]}));
   }
   const signatureContainer = element('div', {class: 'quote-manager-signature'}, [managerBlock(snapshot.documentFields)]);
@@ -782,6 +810,9 @@ async function connectDeal(id) {
   documentsRequest++; generatedDocuments = []; documentsError = ''; documentsLoading = false; previewData = null; previewCreatedDocument = null;
   catalogRequest++; resetCatalogPrices(); priceEdits.clear(); if ($('productDialog').open) closeDialog('productDialog');
   const deal = await adapter.loadDeal(id);
+  let loadedPrimary = null;
+  if (integrationConfig && dealFields) loadedPrimary = await loadPrimaryData(adapter, id, integrationConfig, dealFields);
+  primaryData = loadedPrimary;
   const scope = 'bitrix-' + (window.BX24?.getDomain?.() || window.location.host) + '-deal-' + id;
   const savedSettings = {...state.settings, dealId: String(id)};
   const stored = readStored(scope);
@@ -789,11 +820,12 @@ async function connectDeal(id) {
   else {
     const rows = (deal.rows || []).map(row => ({
       ...newRow({id: String(row.productId || ''), name: row.productName, basePrice: row.price ?? row.unitPrice ?? 0, currency: deal.currency, source: 'deal'}),
-      quantity: String(row.quantity), priceSource: 'deal', taxRate: row.taxRate ?? 0, taxIncluded: row.taxIncluded ?? 'Y'
+      quantity: String(row.quantity), rowType: Number(row.productId) > 0 ? 'catalog' : 'custom', unitWeight: '', priceSource: 'deal', taxRate: row.taxRate ?? 0, taxIncluded: row.taxIncluded ?? 'Y'
     }));
-    state = {schemaVersion: 3, scope, activeDealId: String(id), settings: savedSettings, draft: {...blankDraft(rows), companyName: deal.companyName || deal.title, currency: deal.currency}};
+    state = {schemaVersion: 3, scope, activeDealId: String(id), settings: savedSettings, draft: {...blankDraft(rows), companyName: loadedPrimary?.companyName || deal.companyName || deal.title, currency: deal.currency}};
     config = validateConfig({...config, currency: deal.currency});
   }
+  if (loadedPrimary) draft().companyName = loadedPrimary.companyName;
   state.activeDealId = String(id);
   state.settings = {...state.settings, ...savedSettings};
   templates = []; templatesLoaded = false;
@@ -802,56 +834,64 @@ async function connectDeal(id) {
   status('Сделка #' + id + ' загружена. Существующие строки используют цену сделки; для базовой цены выберите товар из каталога.', 'success');
 }
 async function applyToDeal() {
-  if (busy) return;
-  try {
-    ensureValid();
-    if (state.scope === 'demo') throw new Error('Демонстрационные позиции нельзя записать в реальную сделку. Подключите сделку и выберите товары её каталога.');
-    if (draft().rows.some(r => !isCustomRow(r) && (r.source === 'demo' || !r.productId))) throw new Error('Замените демонстрационные позиции реальными товарами каталога.');
-    if (calculation.rows.some(r => r.unitPrice < 0)) throw new Error('Отрицательные коэффициенты допустимы в модели, но отрицательные цены не отправляются в CRM.');
-    const catalogRows = draft().rows.filter(row => !isCustomRow(row));
-    const catalogCalculation = calculateQuote(catalogRows, config);
-    const crmCalculation = calculateQuote(catalogRows, {...config, rounding: 'unit'});
-    if (Math.abs(crmCalculation.total - catalogCalculation.total) > 0.01) throw new Error('Для переноса в товары сделки выберите в настройках округление «Сначала цена единицы»: CRM хранит цену каждой единицы.');
-    if (String(state.settings.dealId) !== String(state.activeDealId)) throw new Error('ID в настройках изменён. Сначала откройте данные этой сделки.');
-    const dealId = state.activeDealId;
-    const before = await adapter.loadDeal(dealId);
-    previewFingerprint = fingerprintRows(before.rows);
-    const warning = 'Заменить ВСЕ ' + before.rows.length + ' товарных позиций сделки #' + dealId +
-      ' каталоговыми позициями текущего КП (' + draft().rows.filter(row => !isCustomRow(row)).length + '). Произвольные строки останутся только в КП. Общая сумма КП: ' + formatMoney(calculation.total, config.currency) + '. Продолжить?' ;
-    if (!window.confirm(warning)) return;
-    const snapshot = await prepareQuote();
-    if (!snapshot) return;
-    busy = true; recalc(); status('Проверяю сделку и записываю текущий расчёт…');
-    const result = await adapter.applyToDeal(dealId, snapshot, previewFingerprint);
-    status('Текущий расчёт записан в сделку #' + dealId + '. ' + (result?.message || 'Товарные позиции повторно прочитаны и проверены.'), 'success');
-  } catch (error) { status(safeError(error), 'error'); }
-  finally { busy = false; recalc(); }
+  const snapshot = await prepareQuote();
+  if (snapshot) showQuote(snapshot);
 }
+async function restoreCalculation() {
+  if (busy || !integrationReady || !state.activeDealId) return;
+  busy = true; recalc();
+  try {
+    const dealId = String(state.activeDealId), code = integrationConfig.fields.snapshot.code;
+    const deal = await adapter.call('crm.deal.get', {id: Number(dealId)});
+    if (String(deal?.ID) !== dealId) throw new Error('CRM вернула другую сделку.');
+    if (Array.isArray(deal[code]) && deal[code].length !== 1) throw new Error('Поле JSON должно содержать ровно один последний расчёт.');
+    const raw = Array.isArray(deal[code]) ? deal[code][0] : deal[code];
+    const {quote, snapshot} = await verifySnapshot(raw, dealId);
+    await adapter.getQuoteDocument(snapshot.document.id, {dealId, templateId: snapshot.document.templateId});
+    if (!window.confirm('Заменить текущий локальный черновик последним расчётом из сделки #' + dealId + ' (документ #' + snapshot.document.id + ')? Несохранённые изменения будут заменены.')) return;
+    state.draft = {...blankDraft(), companyName: quote.companyName, rows: clone(quote.rows), currency: quote.currency,
+      documentFields: clone(quote.documentFields), managerUserId: quote.managerUserId, managerSignatureReference: quote.managerSignatureReference,
+      managerOverrides: Object.fromEntries(managerFields.map(key => [key, true]))};
+    config = validateConfig(quote.config); previewData = null; previewCreatedDocument = null;
+    render(); remember();
+    status('Расчёт восстановлен из JSON документа #' + snapshot.document.id + ' и заново вычислен штатным калькулятором. Тексты сохранённого КП сохранены.', 'success');
+  } catch (error) {status(safeError(error), 'error');}
+  finally {busy = false; recalc();}
+}
+
 function bindEvents() {
-  for (const key of documentFieldNames) $(key).addEventListener('input', e => {
+  $('itemsBody').addEventListener('change', e => {
+    if (e.target.dataset.field !== 'separateDelivery') return;
+    const row = draft().rows.find(item => item.id === e.target.closest('[data-row-id]')?.dataset.rowId);
+    if (!row) return;
+    row.deliveryRole = e.target.checked ? 'separate' : '';
+    if (e.target.checked) row.unitWeight = '0';
+    recalc();
+  });
+  for (const key of managerFields) $(key).addEventListener('input', e => {
     draft().documentFields[key] = e.target.value;
     if (managerFields.includes(key)) { ensureManagerOverrides(draft())[key] = true; renderManagerControls(); }
-    if (key === 'YuzmPaymentTerms') $('paymentTermsPreset').value = Object.keys(paymentPresets).find(k => paymentPresets[k] === e.target.value) || '';
-    if (key === 'YuzmDeliveryTerms') $('deliveryTermsPreset').value = Object.keys(deliveryPresets).find(k => deliveryPresets[k] === e.target.value) || '';
-    if (key === 'YuzmFastenerTerms') $('fastenerTermsPreset').value = Object.keys(fastenerPresets).find(k => fastenerPresets[k] === e.target.value) || '';
     remember();
   });
-  $('paymentTermsPreset').addEventListener('change', e => {
-    if (paymentPresets[e.target.value]) { draft().documentFields.YuzmPaymentTerms = paymentPresets[e.target.value]; renderTerms(); remember(); }
+  $('restoreCalculationBtn').addEventListener('click', restoreCalculation);
+  $('reloadTextsBtn').addEventListener('click', async () => {
+    if (busy) return;
+    try { await reloadIntegration(); renderTerms(); recalc(); status('Тексты и настройки перечитаны. Введённые формулировки черновика сохранены; новые варианты доступны для выбора.'); }
+    catch (error) {integrationMessage = safeError(error); status(integrationMessage, 'error'); recalc();}
   });
-  $('fastenerTermsPreset').addEventListener('change', e => {
-    if (fastenerPresets[e.target.value]) { draft().documentFields.YuzmFastenerTerms = fastenerPresets[e.target.value]; renderTerms(); remember(); }
+  $('resumeSaveBtn').addEventListener('click', () => {
+    try {
+      const pending = saver.pending(state.activeDealId);
+      if (!pending || pending.stage === 'done') throw new Error('Незавершённых сохранений нет.');
+      showQuote(clone(pending.quote));
+    } catch (error) {status(safeError(error), 'error');}
   });
-  $('deliveryTermsPreset').addEventListener('change', e => {
-    if (deliveryPresets[e.target.value]) {
-      draft().documentFields.YuzmDeliveryTerms = deliveryPresets[e.target.value];
-      renderTerms(); remember();
-    }
+  $('recoverDocumentBtn').addEventListener('click', async () => {
+    const id = window.prompt('ID документа из истории незавершённого сохранения:');
+    if (!id) return;
+    try {await saver.recoverDocument(state.activeDealId, id); status('Документ проверен. Нажмите «Продолжить сохранение КП».'); recalc();}
+    catch (error) {status(safeError(error), 'error');}
   });
-  document.querySelectorAll('[data-term-preset]').forEach(button => button.addEventListener('click', () => {
-    const key = button.dataset.termPreset;
-    if (defaultDocumentFields[key]) { draft().documentFields[key] = defaultDocumentFields[key]; renderTerms(); remember(); }
-  }));
   $('companyName').addEventListener('input', e => { draft().companyName = e.target.value; remember(); });
   $('refreshTemplatesBtn').addEventListener('click', async () => {
     try { await refreshSharedTemplate(); await refreshTemplates(); $('defaultDocumentTemplateId').value = selectedTemplateId(); }
@@ -1034,6 +1074,9 @@ async function connectPortal() {
       throw error;
     }
     connected = true; invalidateCatalog();
+    saver.scope = adapter.sdk.getDomain?.() || window.location.host;
+    try { await reloadIntegration(); }
+    catch (error) { integrationMessage = 'Настройка интеграции: ' + safeError(error); status(integrationMessage, 'error'); }
     connectionCode = 'CONNECTED';
     render(); connectionMessage('Bitrix24 подключён. Доступ к REST API подтверждён.');
     try { await refreshSharedTemplate(); }
@@ -1059,6 +1102,7 @@ async function boot() {
   try {
     const prices = await fetch('data/coatings.example.json').then(r => r.json());
     builtinConfig = validateConfig(prices); config = clone(builtinConfig);
+    useTextConfig(validateTextTemplates(await fetch('data/yuzm-quote-texts.json').then(r => r.json())));
     migrateStoredDrafts();
     state = freshState();
     const stored = readStored('demo'); if (stored) restore(stored);
