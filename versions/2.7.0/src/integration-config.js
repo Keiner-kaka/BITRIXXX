@@ -32,12 +32,17 @@ export function normalizeFields(raw, userFields = []) {
 }
 export function normalizeIntegrationConfig(raw = {}) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || (raw.schemaVersion !== undefined && raw.schemaVersion !== 1)) throw new Error('Неизвестная версия настроек интеграции.');
+  for (const key of ['fields', 'resources']) if (raw[key] !== undefined && (!raw[key] || typeof raw[key] !== 'object' || Array.isArray(raw[key]))) throw new Error(`${key}: ожидается объект настроек.`);
+  for (const [key, mapping] of Object.entries(raw.fields || {})) {
+    if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping) || mapping.code !== undefined && typeof mapping.code !== 'string' || mapping.required !== undefined && typeof mapping.required !== 'boolean') throw new Error(`${key}: некорректное назначение поля.`);
+  }
   const fields = Object.fromEntries(Object.entries(PARAMETERS).map(([key, param]) => [key, {
     code: raw.fields?.[key]?.code ?? param.default ?? '', required: param.required || Boolean(raw.fields?.[key]?.required),
   }]));
   const resources = {textFileId: '', textFolderId: '', diskProxyPath: '', referenceFileIds: [], ...raw.resources};
-  for (const key of ['textFileId', 'textFolderId']) if (resources[key]) resources[key] = positiveId(resources[key], key);
-  resources.referenceFileIds = (resources.referenceFileIds || []).map(value => positiveId(value, 'Справочный файл'));
+  for (const key of ['textFileId', 'textFolderId']) resources[key] = resources[key] === '' || resources[key] === null || resources[key] === undefined ? '' : positiveId(resources[key], key);
+  if (!Array.isArray(resources.referenceFileIds)) throw new Error('ID справочных файлов должны быть массивом.');
+  resources.referenceFileIds = resources.referenceFileIds.map(value => positiveId(value, 'Справочный файл'));
   if (resources.diskProxyPath && (!/^\/(?!\/)[a-zA-Z0-9_./-]+$/.test(resources.diskProxyPath) || resources.diskProxyPath.includes('..'))) throw new Error('Прокси Диска должен быть путём на текущем HTTPS-хосте.');
   const snapshotMaxBytes = Number(raw.snapshotMaxBytes ?? 60000);
   if (!Number.isSafeInteger(snapshotMaxBytes) || snapshotMaxBytes < 1024 || snapshotMaxBytes > 2000000) throw new Error('Лимит JSON должен быть от 1024 до 2000000 байт.');
@@ -45,7 +50,7 @@ export function normalizeIntegrationConfig(raw = {}) {
   if (deliveryCoefficientKeys !== null && (!Array.isArray(deliveryCoefficientKeys) || deliveryCoefficientKeys.some(key => !['k1', 'k2', 'k3'].includes(key)) || new Set(deliveryCoefficientKeys).size !== deliveryCoefficientKeys.length)) throw new Error('Недопустимые коэффициенты доставки.');
   return {schemaVersion: 1, revision: String(raw.revision || ''), fields, resources, snapshotMaxBytes, deliveryCoefficientKeys};
 }
-export function validateMappings(config, fields) {
+export function validateFieldMappings(config, fields) {
   const used = new Set();
   for (const [key, param] of Object.entries(PARAMETERS)) {
     const map = config.fields[key], field = fields[map.code];
@@ -56,6 +61,10 @@ export function validateMappings(config, fields) {
     used.add(map.code);
     if (param.direction === 'out' && field.readOnly) throw new Error(`${field.label}: поле доступно только для чтения.`);
   }
+  return true;
+}
+export function validateMappings(config, fields) {
+  validateFieldMappings(config, fields);
   if (!config.resources.textFileId) throw new Error('В админке не выбран JSON-файл текстов КП на Диске.');
   if (config.deliveryCoefficientKeys === null) throw new Error('В админке укажите коэффициенты доставки либо явно выберите «нет».');
   return true;
@@ -96,11 +105,15 @@ export function encodeResult(value, field, currency) {
   return field.multiple ? [scalar] : scalar;
 }
 export class IntegrationSettings {
-  constructor(adapter) { this.adapter = adapter; }
-  async load() {
+  constructor(adapter, {now = () => Date.now()} = {}) { this.adapter = adapter; this.now = now; this.lastRevision = ''; }
+  async loadRecord() {
     const raw = await this.adapter.call('app.option.get', {option: CONFIG_OPTION});
-    return normalizeIntegrationConfig(raw ? typeof raw === 'string' ? JSON.parse(raw) : raw : {});
+    const exists = raw !== null && raw !== undefined && raw !== '';
+    const config = normalizeIntegrationConfig(exists ? typeof raw === 'string' ? JSON.parse(raw) : raw : {});
+    if (exists && (!this.lastRevision || Date.parse(config.revision) > Date.parse(this.lastRevision))) this.lastRevision = config.revision;
+    return {config, exists};
   }
+  async load() { return (await this.loadRecord()).config; }
   async fields() {
     const [raw, custom] = await Promise.all([
       this.adapter.call('crm.deal.fields'), this.adapter._list('crm.deal.userfield.list'),
@@ -109,11 +122,30 @@ export class IntegrationSettings {
   }
   async save(value, fields) {
     if (!this.adapter.canManageSettings()) throw new Error('Настройки интеграции может сохранять только администратор Bitrix24.');
-    const config = normalizeIntegrationConfig({...value, revision: new Date().toISOString()});
+    const config = normalizeIntegrationConfig(value);
     validateMappings(config, fields);
+    const previous = Math.max(Date.parse(config.revision) || 0, Date.parse(this.lastRevision) || 0);
+    config.revision = new Date(Math.max(this.now(), previous + 1)).toISOString();
     const encoded = JSON.stringify(config);
-    if (await this.adapter.call('app.option.set', {options: {[CONFIG_OPTION]: encoded}}) !== true) throw new Error('Bitrix24 не подтвердил запись настроек.');
-    if (JSON.stringify(await this.load()) !== encoded) throw new Error('Настройки изменились при сохранении; перечитайте конфигурацию.');
+    this.lastRevision = config.revision;
+    try {
+      if (await this.adapter.call('app.option.set', {options: {[CONFIG_OPTION]: encoded}}) !== true) throw new Error('Bitrix24 не подтвердил запись настроек.');
+    } catch (cause) {
+      if (!['REQUEST_TIMEOUT', 'CLIENT_ERROR', 'SDK_TRANSPORT_ERROR', 'SDK_RESPONSE_ERROR'].includes(cause.code)) throw cause;
+      const error = new Error('Запись отправлена, подтверждение сохранения не получено.', {cause});
+      error.writeSubmitted = true; error.submittedRevision = config.revision; throw error;
+    }
+    try {
+      const actual = await this.loadRecord();
+      if (!actual.exists || JSON.stringify(actual.config) !== encoded) {
+        const error = new Error('Контрольное чтение не совпало с отправленной конфигурацией.');
+        error.method = 'app.option.get'; error.code = 'CONFIG_MISMATCH'; throw error;
+      }
+    } catch (cause) {
+      const error = new Error('Запись отправлена, подтверждение сохранения не получено.', {cause});
+      error.writeSubmitted = true; error.submittedRevision = config.revision;
+      throw error;
+    }
     return config;
   }
 }

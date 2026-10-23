@@ -4,6 +4,7 @@ import { filterCatalogEntries, catalogNavigation, navigationFields, NAVIGATION_I
 import {SUPPORT_SECTION_IDS, catalogSectionId} from './fasteners.js';
 import {signatureReference} from './manager.js';
 import {displayValue} from './integration-config.js';
+import {safeErrorText} from './rest-errors.js';
 
 const ALLOWED_METHODS = new Set([
   'app.info', 'app.option.get', 'app.option.set', 'user.get', 'methods',
@@ -90,8 +91,7 @@ function documentTemplate(raw, categoryId) {
 }
 
 function apiError(method, result) {
-  // API descriptions can include request URLs, auth parameters or arbitrary server HTML.
-  // Show only a constrained error code; never propagate those descriptions to the UI.
+  // Keep useful descriptions only after redacting URLs and credential values.
   const sdkError = result.error();
   const details = sdkError?.getError?.() ?? sdkError?.ex;
   const raw = details?.error ?? result.answer?.error
@@ -121,9 +121,11 @@ function apiError(method, result) {
     ERROR_UNEXPECTED_ANSWER: 'Bitrix24 вернул неожиданный ответ. Повторите запрос позже.',
     API_ERROR: 'Bitrix24 не вернул распознаваемый код ошибки. Проверьте запрос и доступ сотрудника к каталогу.',
   };
-  const error = new Error(`Bitrix24: ${method} — ${code}. ${hints[code] ?? 'Проверьте права приложения и пользователя.'}`);
+  const safeDescription = safeErrorText(description) || hints[code] || 'Проверьте права приложения и пользователя.';
+  const error = new Error(`Bitrix24: ${method} — ${code}. ${safeDescription}`);
   error.code = code;
   error.method = method;
+  error.description = safeDescription;
   return error;
 }
 
@@ -272,6 +274,7 @@ export class BitrixAdapter {
       let settled = false;
       const finish = (error, data) => {
         if (settled) return;
+        if (error) { error.method ||= method; error.code ||= 'CLIENT_ERROR'; }
         settled = true;
         clearTimeout(timer);
         this._finishTrace(trace, error);
@@ -327,6 +330,7 @@ export class BitrixAdapter {
       let timer;
       const finish = (error) => {
         if (settled) return;
+        if (error) { error.method ||= method; error.code ||= 'CLIENT_ERROR'; }
         settled = true;
         clearTimeout(timer);
         this._finishTrace(trace, error);

@@ -16,6 +16,7 @@ FIELDS = {
     'PAYMENT': {'title': 'Оплата', 'type': 'enumeration', 'isMultiple': True, 'items': [{'ID': '1', 'VALUE': 'Безналичный'}]},
     'ADDRESS': {'title': 'Адрес', 'type': 'string', 'isMultiple': True},
     'RESULT_TOTAL': {'title': 'Сумма заказа', 'type': 'money'},
+    'RESULT_TOTAL_ALT': {'title': 'Другая сумма заказа', 'type': 'money'},
     'RESULT_DELIVERY': {'title': 'Доставка', 'type': 'double'},
     'RESULT_WEIGHT': {'title': 'Масса', 'type': 'double'},
     'RESULT_JSON': {'title': 'JSON КП', 'type': 'string'},
@@ -28,19 +29,23 @@ CONFIG = {'schemaVersion': 1, 'revision': '1', 'fields': {
 MOCK = r"""
 const configuration = __CONFIG__;
 const fields = __FIELDS__;
-window.testState = {texts: __TEXTS__, calls: [], docs: [], failUpdate: 0,
+window.testState = {texts: __TEXTS__, fields, calls: [], docs: [], failUpdate: 0, faults: {}, failReadAfterWrite: false,
   deal: {ID:'718',TITLE:'Тестовая сделка',COMPANY_ID:'5',ASSIGNED_BY_ID:'7',DATE_CREATE:'2026-10-23T12:00:00+03:00',PAYMENT:['1'],ADDRESS:['Адрес теста'],CATEGORY_ID:'0',CURRENCY_ID:'RUB',RESULT_JSON:''},
   rows: [{ID:'90',PRODUCT_ID:0,PRODUCT_NAME:'Прежняя работа',PRICE:10,QUANTITY:1,SORT:10,TAX_RATE:0,TAX_INCLUDED:'Y'}],
-  options: {yuzmIntegrationConfig: JSON.stringify(configuration),yuzmQuoteTemplateId:'3'}};
+  options: JSON.parse(localStorage.getItem('mock-shared-app-options') || 'null') || {...(__SAVED__ ? {yuzmIntegrationConfig: JSON.stringify(configuration)} : {}),yuzmQuoteTemplateId:'3'}};
 window.BX24 = {init: cb=>setTimeout(cb,0),isAdmin:()=>__ADMIN__,getDomain:()=>'mock.portal.example',
   placement:{info:()=>({placement:'CRM_DEAL_DETAIL_TAB',options:{ID:'718'}})},
   callMethod(method, params, callback) {
     const s=window.testState;s.calls.push({method,params:structuredClone(params)});
-    let data, error=false;
-    if(method==='app.info')data={INSTALLED:'Y'};
+    let data, error=false, description='';
+    if(s.faults[method]){error=s.faults[method].code;description=s.faults[method].description;}
+    else if(method==='app.info')data={INSTALLED:'Y'};
     else if(method==='app.option.get')data=s.options[params.option]??'';
-    else if(method==='app.option.set'){Object.assign(s.options,params.options);data=true;}
-    else if(method==='crm.deal.fields')data=fields;
+    else if(method==='app.option.set'){
+      Object.assign(s.options,params.options);localStorage.setItem('mock-shared-app-options',JSON.stringify(s.options));data=true;
+      if(s.failReadAfterWrite)s.faults['app.option.get']={code:'ACCESS_DENIED',description:'Контрольное чтение запрещено.'};
+    }
+    else if(method==='crm.deal.fields')data=s.fields;
     else if(method==='crm.deal.userfield.list')data=[];
     else if(method==='crm.deal.get')data=s.deal;
     else if(method==='crm.deal.productrows.get')data=s.rows;
@@ -62,15 +67,15 @@ window.BX24 = {init: cb=>setTimeout(cb,0),isAdmin:()=>__ADMIN__,getDomain:()=>'m
     else if(method==='disk.folder.getchildren')data=[{ID:101,NAME:'yuzm-quote-texts.json',TYPE:'file'}];
     else if(method==='disk.file.uploadVersion'){
       const binary=atob(params.fileContent[1]);s.texts=JSON.parse(new TextDecoder().decode(Uint8Array.from(binary,c=>c.charCodeAt(0))));data={ID:String(params.id)};
-    }else if(method==='methods')data=['app.option.get','app.option.set','crm.deal.fields','crm.deal.userfield.list','crm.deal.get','crm.deal.update','crm.deal.productrows.get','crm.item.productrow.set','crm.documentgenerator.document.add','crm.documentgenerator.document.get','crm.documentgenerator.document.list','crm.documentgenerator.template.get','crm.documentgenerator.template.list','disk.file.get','disk.file.uploadVersion','user.get'];
+    }else if(method==='methods')data=['app.option.get','app.option.set']; // Intentionally incomplete.
     else error='MOCK_METHOD_UNSUPPORTED';
     const copied=structuredClone(data);
-    setTimeout(()=>callback({error:()=>error,answer:{error:error||undefined},data:()=>copied,more:()=>false,total:()=>Array.isArray(copied)?copied.length:0}),0);
+    setTimeout(()=>callback({error:()=>error,answer:{error:error||undefined,error_description:description},data:()=>copied,more:()=>false,total:()=>Array.isArray(copied)?copied.length:0}),0);
   }};
 """
 
-def setup(page, admin=True):
-    script = MOCK.replace('__CONFIG__', json.dumps(CONFIG)).replace('__FIELDS__', json.dumps(FIELDS)).replace('__TEXTS__', json.dumps(TEXTS)).replace('__ADMIN__', 'true' if admin else 'false')
+def setup(page, admin=True, saved=True):
+    script = MOCK.replace('__CONFIG__', json.dumps(CONFIG)).replace('__FIELDS__', json.dumps(FIELDS)).replace('__TEXTS__', json.dumps(TEXTS)).replace('__ADMIN__', 'true' if admin else 'false').replace('__SAVED__', 'true' if saved else 'false')
     page.add_init_script(script)
     page.route('https://portal.example/texts.json', lambda route: route.fulfill(status=200, content_type='application/json', headers={'Access-Control-Allow-Origin': '*'}, body=json.dumps(page.evaluate('testState.texts'))))
 
@@ -130,7 +135,7 @@ with sync_playwright() as p:
     admin = context.new_page(); setup(admin); admin.goto(BASE+'/admin.html')
     admin.wait_for_function("!document.getElementById('adminControls').disabled")
     assert admin.locator('#map-snapshot').input_value() == 'RESULT_JSON'
-    admin.locator('#checkConfig').click(); admin.wait_for_function("document.getElementById('adminStatus').textContent.startsWith('Поля, чтение JSON')")
+    admin.locator('#checkConfig').click(); admin.locator('#diagnosticResults [data-component="documents"][data-state="ok"]').wait_for()
     admin.locator('#listTextFiles').click(); admin.wait_for_function("document.getElementById('diskFilePicker').options.length===2")
     changed = json.loads(json.dumps(TEXTS)); changed['version']='browser-test-2'; changed['templates']['documents']['presets'][0]['text']='Обновлённая формулировка'
     admin.locator('#textUpload').set_input_files({'name':'texts.json','mimeType':'application/json','buffer':json.dumps(changed,ensure_ascii=False).encode()})
@@ -138,8 +143,78 @@ with sync_playwright() as p:
     admin.locator('#publishTexts').click(); admin.wait_for_function("document.getElementById('adminStatus').textContent.includes('Новая версия опубликована')")
     assert admin.evaluate('testState.texts.version') == 'browser-test-2'
     print('PASS: admin field metadata, configuration check, folder selection, JSON preview and publication with same file ID')
+    # Settings persist even when generator/Disk access fails and methods is incomplete.
+    admin.locator('#map-total').select_option('RESULT_TOTAL_ALT')
+    assert 'Есть несохранённые изменения' in admin.locator('#settingsSaveStatus').inner_text()
+    admin.evaluate("""testState.faults = {
+      'crm.documentgenerator.template.list': {code:'ACCESS_DENIED',description:'Генератор недоступен.'},
+      'disk.file.get': {code:'ACCESS_DENIED',description:'Файл недоступен. https://portal.example/file?auth=SECRET_DOWNLOAD token=SECRET_TOKEN'}
+    }""")
+    offset = admin.evaluate('testState.calls.length')
+    admin.locator('#saveConfig').click(); admin.wait_for_function("document.getElementById('adminStatus').textContent.startsWith('Настройки сохранены.')")
+    assert admin.evaluate('(offset)=>testState.calls.slice(offset).map(call=>call.method)', offset) == ['crm.deal.fields','crm.deal.userfield.list','app.option.set','app.option.get']
+    first_revision = admin.evaluate('JSON.parse(testState.options.yuzmIntegrationConfig).revision')
+    assert first_revision in admin.locator('#configRevision').inner_text()
+    stored = admin.evaluate('testState.options.yuzmIntegrationConfig')
+    admin.locator('#checkConfig').click(); admin.locator('#diagnosticResults [data-component="texts"][data-state="error"]').wait_for()
+    admin.wait_for_function("!document.getElementById('adminControls').disabled")
+    assert admin.locator('#diagnosticResults [data-component="fields"]').get_attribute('data-state') == 'ok'
+    assert admin.locator('#diagnosticResults [data-component="documents"]').get_attribute('data-state') == 'error'
+    error_text = admin.locator('#diagnosticResults').inner_text()
+    assert 'disk.file.get' in error_text and 'ACCESS_DENIED' in error_text and 'Файл недоступен' in error_text
+    assert 'SECRET_DOWNLOAD' not in error_text and 'SECRET_TOKEN' not in error_text
+    assert admin.evaluate('testState.options.yuzmIntegrationConfig') == stored
+    assert admin.locator('#settingsSaveStatus').inner_text() == 'Настройки сохранены.'
+    admin.evaluate('testState.faults = {}')
+    admin.unroute('https://portal.example/texts.json')
+    admin.route('https://portal.example/texts.json', lambda route: route.fulfill(status=200,content_type='application/json',headers={'Access-Control-Allow-Origin':'*'},body='{'))
+    admin.locator('#checkConfig').click(); admin.locator('#diagnosticResults [data-component="texts"][data-state="error"]').wait_for()
+    admin.wait_for_function("!document.getElementById('adminControls').disabled")
+    assert admin.locator('#diagnosticResults [data-component="documents"]').get_attribute('data-state') == 'ok'
+    admin.locator('#saveConfig').click(); admin.wait_for_function("document.getElementById('adminStatus').textContent.startsWith('Настройки сохранены.')")
+    assert admin.evaluate('JSON.parse(testState.options.yuzmIntegrationConfig).revision') != first_revision
+    # A failed verification preserves inputs and accurately labels the write as unconfirmed.
+    admin.locator('#map-total').select_option('RESULT_TOTAL')
+    admin.evaluate('testState.failReadAfterWrite = true')
+    admin.locator('#saveConfig').click(); admin.wait_for_function("document.getElementById('settingsSaveStatus').textContent.includes('подтверждение сохранения не получено')")
+    assert admin.locator('#map-total').input_value() == 'RESULT_TOTAL'
+    assert 'app.option.get' in admin.locator('#adminStatus').inner_text()
+    admin.evaluate('testState.faults = {}; testState.failReadAfterWrite = false')
+    admin.once('dialog', lambda dialog: dialog.accept()); admin.locator('#reloadConfig').click()
+    admin.wait_for_function("document.getElementById('adminStatus').textContent.includes('перечитаны из app.option')")
+    persisted_revision = admin.evaluate('JSON.parse(testState.options.yuzmIntegrationConfig).revision')
+    admin.locator('#map-total').select_option('RESULT_TOTAL_ALT')
+    reads = admin.evaluate("testState.calls.filter(call=>call.method==='app.option.get').length")
+    admin.once('dialog', lambda dialog: dialog.dismiss()); admin.locator('#reloadConfig').click()
+    admin.wait_for_function("!document.getElementById('adminControls').disabled")
+    assert admin.locator('#map-total').input_value() == 'RESULT_TOTAL_ALT'
+    assert admin.evaluate("testState.calls.filter(call=>call.method==='app.option.get').length") == reads
+    admin.once('dialog', lambda dialog: dialog.accept()); admin.locator('#reloadConfig').click()
+    admin.wait_for_function("document.getElementById('settingsSaveStatus').textContent === 'Настройки сохранены.'")
+    assert admin.locator('#map-total').input_value() == 'RESULT_TOTAL'
+    admin.reload(); admin.wait_for_function("document.getElementById('settingsSaveStatus').textContent === 'Настройки сохранены.'")
+    assert admin.locator('#map-total').input_value() == 'RESULT_TOTAL'
+    assert persisted_revision in admin.locator('#configRevision').inner_text()
+    # A field deleted on the server causes a validation error without clearing selections.
+    admin.evaluate('delete testState.fields.RESULT_WEIGHT')
+    admin.locator('#map-total').select_option('RESULT_TOTAL_ALT')
+    writes = admin.evaluate("testState.calls.filter(call=>call.method==='app.option.set').length")
+    admin.locator('#saveConfig').click(); admin.wait_for_function("document.getElementById('adminStatus').textContent.includes('выберите доступное поле')")
+    assert admin.locator('#map-total').input_value() == 'RESULT_TOTAL_ALT'
+    assert admin.locator('#map-weight').input_value() == 'RESULT_WEIGHT'
+    assert admin.evaluate("testState.calls.filter(call=>call.method==='app.option.set').length") == writes
+    print('PASS: isolated settings save, independent diagnostics, safe REST errors, dirty/revision/unconfirmed states, reload confirmation, reopen persistence, deleted-field protection')
     denied = context.new_page(); setup(denied, admin=False); denied.goto(BASE+'/admin.html')
-    denied.wait_for_function("document.getElementById('adminStatus').textContent.includes('только администратору')")
+    denied.wait_for_function("document.getElementById('adminStatus').textContent.includes('только администратор')")
     assert denied.locator('#saveConfig').is_disabled()
-    print('PASS: manager cannot use admin writes')
+    assert denied.locator('#map-total').input_value() == 'RESULT_TOTAL'
+    assert persisted_revision in denied.locator('#configRevision').inner_text()
+    assert denied.locator('#checkConfig').is_enabled()
+    print('PASS: manager reads common settings and revision but cannot use admin writes')
+    empty_context = browser.new_context()
+    empty = empty_context.new_page(); setup(empty,saved=False); empty.goto(BASE+'/admin.html')
+    empty.wait_for_function("document.getElementById('settingsSaveStatus').textContent === 'Общие настройки ещё не сохранены.'")
+    assert empty.locator('#map-client').input_value() == 'COMPANY_ID'
+    assert empty.evaluate("testState.calls.every(call=>call.method!=='app.option.set')")
+    print('PASS: defaults are never labeled as a saved configuration')
     browser.close()

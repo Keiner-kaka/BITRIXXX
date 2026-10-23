@@ -1,6 +1,6 @@
 {
   "name": "yuzm-kp-bitrix",
-  "version": "2.7.0-integration.1",
+  "version": "2.7.0-integration.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,5 +8,7 @@
     "test": "node --test tests/*.test.mjs",
     "check": "node scripts/check.mjs"
   },
-  "engines": {"node": ">=20"}
+  "engines": {
+    "node": ">=20"
+  }
 }

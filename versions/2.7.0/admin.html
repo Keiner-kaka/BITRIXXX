@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>ЮЗМ · Настройка интеграции</title>
+  <meta name="application-version" content="2.7.0-integration.2"><title>ЮЗМ · Настройка интеграции</title>
   <link rel="stylesheet" href="styles.css"><script src="src/sdk-loader.js"></script>
 </head>
 <body>
@@ -10,6 +10,7 @@
   <header><h1>Настройка интеграции ЮЗМ</h1><a href="index.html">Вернуться в конструктор</a></header>
   <p>Настройки действуют для всех менеджеров этой установленной интеграции. Изменять их может администратор Bitrix24.</p>
   <p id="adminStatus" role="status" aria-live="polite">Подключение к Bitrix24…</p>
+  <p id="settingsSaveStatus" role="status" aria-live="polite"></p>
   <fieldset id="adminControls" disabled>
     <section class="settings-section"><h2>Поля сделки</h2><p>Поля CRM не создаются и не удаляются. Для JSON выберите текстовое поле достаточной длины.</p><div id="fieldMappings"></div></section>
     <section class="settings-section"><h2>Расчёт и ограничения</h2>
@@ -46,6 +47,11 @@
       <button id="saveConfig" class="button primary" type="button">Сохранить общие настройки</button>
     </div>
     <p id="configRevision" class="hint"></p>
+    <section aria-labelledby="diagnosticTitle">
+      <h2 id="diagnosticTitle">Результаты диагностики</h2>
+      <p class="hint">Проверяются только чтение и структура данных. Права записи проверяются при соответствующем действии.</p>
+      <ul id="diagnosticResults" aria-live="polite"></ul>
+    </section>
   </fieldset>
 </main>
 <script type="module" src="src/admin.js"></script>
