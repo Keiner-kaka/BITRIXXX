@@ -1,5 +1,13 @@
 # Конструктор КП ЮЗМ — пилот для Bitrix24
 
+## 2.7.3 — версии параметров расчёта на Битрикс Диске
+
+[Скачать установочный ZIP](https://github.com/Keiner-kaka/BITRIXXX/raw/refs/heads/release/v2.7.3/dist/yuzm-kp-bitrix-2.7.3.zip) · [Исходники и настройка](versions/2.7.3)
+
+Отдельная версия на базе предоставленного архива 2.7.2. JSON с параметрами использованных строк, данными сделки и уникальной версией сохраняется при генерации документа и подтверждённом переносе строк. Предпросмотр не создаёт версию. ID папки Битрикс Диска указывается в настройках. Остальная логика исходного архива сохранена.
+
+SHA-256 ZIP: `e42b424a9aca8fa35a49f97b7d2d3e89731f3eb5405a269c72dcba78852b96f5`.
+
 ## v2.7.0-integration.2 — исправление сохранения настроек
 
 [Скачать приложение v2.7.0-integration.2](https://github.com/Keiner-kaka/BITRIXXX/raw/refs/heads/main/dist/yuzm-kp-bitrix-2.7.0-integration.2.zip) · [Технический отчёт](versions/2.7.0/docs/technical-report.md) · [Исходники](versions/2.7.0) · [Установка и настройка](versions/2.7.0/docs/integration-setup.md)
