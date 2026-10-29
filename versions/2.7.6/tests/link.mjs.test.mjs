@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import {BitrixAdapter} from '../src/bitrix.js';
+const calls=[];
+const adapter=new BitrixAdapter({sdk:{callMethod(method,params,cb){calls.push({method,params});cb({error:()=>null,data:()=>method==='disk.file.uploadVersion'?{ID:'7'}:{ID:'7',NAME:params.newName}});}}});adapter.connected=true;
+const saved={fileId:'7',name:'yuzm-kp-deal-42-date-v1.json',data:{schemaVersion:1,version:'v1',deal:{id:'42'},parameters:{rows:[]}}};
+const result=await adapter.linkCalculationVersion(saved,'900');
+assert.equal(result.name,'yuzm-kp-deal-42-date-v1-document-900.json');
+const written=JSON.parse(Buffer.from(calls[0].params.fileContent[1],'base64').toString('utf8'));
+assert.equal(written.documentId,'900');assert.equal(written.version,'v1');
+assert.equal(saved.data.documentId,undefined);
+assert.deepEqual(calls.map(c=>c.method),['disk.file.uploadVersion','disk.file.rename']);
+assert.equal(calls[1].params.newName,result.name);
+console.log('PASS: saved JSON and file name linked to exact document ID without new file or version UUID');
