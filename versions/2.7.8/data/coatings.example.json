@@ -1,0 +1,40 @@
+{
+  "version": "builtin-2.7.0",
+  "calculationVersion": 3,
+  "currency": "RUB",
+  "formulaMode": "catalog",
+  "rounding": "line",
+  "coatings": [
+    {
+      "code": "none",
+      "name": "Без покрытия"
+    },
+    {
+      "code": "zinc",
+      "name": "Горячее цинкование"
+    },
+    {
+      "code": "paint",
+      "name": "Окраска",
+      "supportsRal": true
+    },
+    {
+      "code": "zinc_paint",
+      "name": "Горячее цинкование + окрашивание RAL",
+      "supportsRal": true
+    },
+    {
+      "code": "zinc_primer_paint",
+      "name": "Цинкогрунт + окрашивание",
+      "supportsRal": true
+    },
+    {
+      "code": "bitumen",
+      "name": "Битумный лак"
+    },
+    {
+      "code": "custom",
+      "name": "Нестандартное покрытие"
+    }
+  ]
+}
